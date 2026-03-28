@@ -6,4 +6,5 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(cpp_TaskScheduler
     src/main.cpp
+    src/SafeQueue.hpp
 )

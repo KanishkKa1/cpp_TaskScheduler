@@ -1,4 +1,7 @@
 * text=auto
+
 *.cpp text
 *.hpp text
+*.h text
+*.cmake text
 CMakeLists.txt text

@@ -47,7 +47,7 @@ OS Threads / CPU
 
 ## ⚙️ Core Components
 
-### 🔹 1. SafeQueue<T>
+### 🔹 1. SafeQueue< T >
 
 A thread-safe queue supporting:
 
