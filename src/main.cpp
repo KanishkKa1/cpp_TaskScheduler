@@ -1,6 +1,6 @@
-#include<iostream>
+#include <iostream>
 
-int main(){
-    std::cout<<"Scheduler starting..\n";
+int main() {
+    std::cout << "Scheduler starting..\n";
     return 0;
 }

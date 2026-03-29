@@ -1,61 +1,120 @@
+#pragma once
 #include <condition_variable>
+#include <cstddef>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <utility>
+
+// Thread-safe unbounded queue.
+//
+// Semantics:
+// - push/emplace:
+//     * return false after shutdown
+// - pop:
+//     * blocks until item available or shutdown
+// - try_pop:
+//     * non-blocking
+// - shutdown:
+//     * prevents further pushes
+//     * wakes all waiting threads
+//     * allows consumers to drain remaining items
+//     * subsequent pop returns nullopt when empty
+// - empty/size:
+//     * provide current state of the queue
+// - is_shutdown:
+//     * indicates if shutdown has been initiated
+// Note: This implementation does not support copying or moving the queue.
 
 template <typename T> class SafeQueue {
   private:
     std::queue<T> queue_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable cv_;
-    bool shutdown_ = false; // Indicates no more work will be added to the queue
+    bool shutdown_ = false;
 
   public:
-    // push a new task in the queue and notify one waiting thread
-    void push(T value) {
+    SafeQueue() = default;
+
+    SafeQueue(const SafeQueue &) = delete;
+    SafeQueue &operator=(const SafeQueue &) = delete;
+
+    SafeQueue(SafeQueue &&) = delete;
+    SafeQueue &operator=(SafeQueue &&) = delete;
+
+    template <typename U> bool push(U &&value) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            // If shutdown signal is received, do not add new work to the queue
             if (shutdown_) {
-                throw std::runtime_error("Cannot push to queue after shutdown signal is received.");
-                //  return;
+                return false;
             }
-            // move value to avoid unnecessary copies
-            queue_.push(std::move(value));
+            queue_.emplace(std::forward<U>(value));
         }
-        // notify one waiting thread that new work is available in the queue
         cv_.notify_one();
+        return true;
     }
 
-    // blocking pop method that waits until work is available in the queue or
-    // shutdown signal is received
+    template <typename... Args> bool emplace(Args &&...args) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (shutdown_) {
+                return false;
+            }
+            queue_.emplace(std::forward<Args>(args)...);
+        }
+        cv_.notify_one();
+        return true;
+    }
+
     std::optional<T> pop() {
         std::unique_lock<std::mutex> lock(mutex_);
-
-        // wait untill either
-        // 1. work is available in the queue
-        // 2. System shutdown signal is received
         cv_.wait(lock, [this] { return !queue_.empty() || shutdown_; });
-
-        // if shutdown signal is received and there is no work in the queue, return nullopt
-        if (shutdown_ && queue_.empty()) {
+        if (queue_.empty()) {
             return std::nullopt;
         }
 
-        // Safe to access queue as we are holding the lock and there is work available
-        T value = std::move(queue_.front());
+        auto value = std::move(queue_.front());
         queue_.pop();
 
         return value;
     }
 
-    void shutdown() {
+    std::optional<T> try_pop() {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (queue_.empty()) {
+            return std::nullopt;
+        }
+
+        auto value = std::move(queue_.front());
+        queue_.pop();
+
+        return value;
+    }
+
+    void shutdown() noexcept {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            // Set shutdown flag to true -> no more work will be added
+            if (shutdown_) {
+                return;
+            }
             shutdown_ = true;
         }
-        // Notify all waiting threads to wake up and check the shutdown flag
         cv_.notify_all();
+    }
+
+    bool is_shutdown() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return shutdown_;
+    }
+
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
     }
 };
