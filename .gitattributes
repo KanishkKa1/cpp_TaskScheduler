@@ -1,5 +1,4 @@
 * text=auto
-
 *.cpp text
 *.hpp text
 *.h text

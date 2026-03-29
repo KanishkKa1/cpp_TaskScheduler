@@ -41,6 +41,11 @@ compile_commands.json
 *.stackdump
 
 # =========================
+# Generated files
+# =========================
+structure.txt
+
+# =========================
 # Editor / IDE files
 # =========================
 .vscode/
