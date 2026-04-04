@@ -6,26 +6,20 @@
 #include <queue>
 #include <utility>
 
-// Thread-safe unbounded queue.
+// Thread-safe unbounded queue (MPMC).
 //
 // Semantics:
-// - push/emplace:
-//     * return false after shutdown
-// - pop:
-//     * blocks until item available or shutdown
-// - try_pop:
-//     * non-blocking
+// - push/emplace: fail after shutdown
+// - pop: blocks until item available or shutdown
+// - try_pop: non-blocking
 // - shutdown:
 //     * prevents further pushes
 //     * wakes all waiting threads
 //     * allows consumers to drain remaining items
-//     * subsequent pop returns nullopt when empty
-// - empty/size:
-//     * provide current state of the queue
-// - is_shutdown:
-//     * indicates if shutdown has been initiated
-// Note: This implementation does not support copying or moving the queue.
-
+//     * pop returns nullopt when empty after shutdown
+//
+// Notes:
+// - empty() and size() are snapshots and may be stale immediately.
 template <typename T> class SafeQueue {
   private:
     std::queue<T> queue_;

@@ -1,300 +1,207 @@
-# 🚀 C++ Multithreaded Task Scheduler
+﻿# C++ Multithreaded Task Scheduler
 
-A high-performance, scalable **Multithreaded Task Scheduler** built from scratch using **modern C++20**, focusing on **concurrency correctness, performance, and system design principles**.
-
----
-
-## 🎯 Motivation
-
-Most developers *use* concurrency abstractions.
-
-This project exists to:
-
-* **build them from first principles**
-* deeply understand **threading, synchronization, and scheduling**
-* bridge the gap between **DSA knowledge → production systems engineering**
+A **C++20-based multithreaded task scheduler** built from first principles to explore **concurrency correctness, task scheduling, and system-level trade-offs**.
 
 ---
 
-## 🧠 What This Project Demonstrates
+## Problem
 
-* Designing **low-level concurrent primitives**
-* Managing **thread lifecycle and coordination**
-* Handling **race conditions, contention, and memory visibility**
-* Building **scalable systems (10k+ tasks/sec mindset)**
-* Thinking in **state machines and invariants**, not just code
+Most developers use abstractions like thread pools without understanding:
+
+* How tasks are scheduled across threads
+* How synchronization impacts performance
+* What breaks under contention and shutdown
+
+This leads to systems that:
+
+* Work in simple cases
+* Fail under **high load, race conditions, or improper shutdown**
 
 ---
 
-## 🏗️ System Architecture
+## Approach
+
+This project builds a **task scheduler from scratch**, focusing on:
+
+### Core Goals
+
+* Correctness under **multi-producer, multi-consumer concurrency**
+* Clear **state-driven lifecycle management**
+* Explicit handling of **synchronization and coordination**
+
+---
+
+## System Architecture
 
 ```text
-Client (main / API)
-        ↓
-Scheduler Layer
-  ├── ThreadPool
-  ├── Work Stealing (planned)
-  ├── Priority Scheduling (planned)
-        ↓
-Core Primitives
-  ├── SafeQueue<T>
-  ├── Worker Threads
-        ↓
-OS Threads / CPU
+Client
+   |
+   v
+ThreadPool / Scheduler
+   |
+   v
+SafeQueue (MPMC)
+   |
+   v
+Worker Threads
+   |
+   v
+OS Threads
 ```
 
 ---
 
-## ⚙️ Core Components
+## Core Components
 
-### 🔹 1. SafeQueue< T >
+## 1. SafeQueue< T >
 
-A thread-safe queue supporting:
+* Thread-safe **MPMC queue**
+* Uses `std::mutex` + `std::condition_variable`
 
-* Multi-producer / multi-consumer
-* Blocking + non-blocking operations
-* Condition variable synchronization
-* Graceful shutdown semantics
+### Responsibilities
 
-**Key challenges solved:**
+* Safe task submission from multiple producers
+* Blocking workers when queue is empty
+* Coordinated wake-up on new tasks
 
-* Spurious wakeups
-* Lost wakeups
-* Shutdown race conditions
-* Minimizing lock contention
+### Current Limitation
 
----
-
-### 🔹 2. ThreadPool
-
-Manages worker threads responsible for executing tasks.
-
-**Responsibilities:**
-
-* Efficient task dispatching
-* Thread lifecycle management (`std::jthread`)
-* Work distribution across cores
+* **Unbounded queue** -> no backpressure yet
 
 ---
 
-### 🔹 3. Task & Result System
+## 2. ThreadPool
 
-Supports asynchronous execution using:
+* Manages a fixed set of worker threads
+* Dispatches tasks to workers
 
-* `std::future`
-* `std::promise`
-* Type-erased task wrappers
+### Responsibility
 
----
-
-### 🔹 4. Advanced Scheduling (Planned / Extensible)
-
-* Priority-based scheduling (heap-backed)
-* Work stealing for load balancing
-* Timed / delayed task execution
+* Task scheduling
+* Thread lifecycle management
+* Coordinating shutdown
 
 ---
 
-## 🔥 Key Engineering Challenges
+## 3. Task System
 
-### 1. Race Conditions
+* Uses `std::function<void()>` for task abstraction
 
-Ensuring correctness under:
+### Why
+
+* Allows flexible submission of any callable
+
+### Trade-off
+
+* Potential heap allocation and indirect call overhead
+
+---
+
+## Execution Model
+
+1. Producers submit tasks -> pushed into queue
+2. Workers wait on condition variable
+3. On notification:
+
+   * Worker wakes up
+   * Pops task
+   * Executes
+
+---
+
+## State Management
+
+The scheduler follows a **state-driven lifecycle**:
+
+* **RUNNING** -> Accept tasks, workers active
+* **STOPPING** -> Stop accepting tasks, drain queue
+* **STOPPED** -> All workers terminated
+
+---
+
+## Current System Behavior (Important)
+
+### Under High Load
+
+* Tasks accumulate in queue (unbounded)
+* Memory usage increases with task volume
+* Workers process tasks at fixed rate
+
+### Implication
+
+* System correctness is maintained
+* But **no protection against overload yet**
+
+---
+
+## Design Trade-offs
+
+| Decision            | Benefit              | Cost                            |
+| ------------------- | -------------------- | ------------------------------- |
+| Mutex + CV queue    | Simpler, correct     | Lock contention                 |
+| Unbounded queue     | No producer blocking | Memory growth under load        |
+| std::function tasks | Flexible API         | Allocation + indirect call cost |
+| Fixed thread pool   | Stable, predictable  | No dynamic scaling              |
+
+---
+
+## Key Engineering Focus
+
+This project focuses on:
+
+* **Race condition avoidance**
+* Correct use of **condition variables**
+* Understanding **lock contention**
+* Designing safe **shutdown semantics**
+
+---
+
+## Work in Progress
+
+The following are actively being developed:
+
+* Backpressure (bounded queue / rejection policy)
+* Benchmarking (throughput, latency)
+* Stress testing under high concurrency
+* Work-stealing scheduler
+* Priority-based scheduling
+
+---
+
+## Project Structure
 
 ```text
-Multiple producers + multiple consumers + shutdown
+src/
+  core/
+    SafeQueue.hpp
+    ThreadPool.hpp
+    Worker.hpp
+  task/
+    Task.hpp
+    Result.hpp
+  scheduler/
+    PriorityScheduler.hpp
+  utils/
+    Logger.hpp
+
+tests/
+  StressTest.cpp
 ```
 
 ---
 
-### 2. Lock Contention
+## Impact (What This Project Demonstrates)
 
-* Avoiding global bottlenecks
-* Minimizing critical section size
-
----
-
-### 3. Condition Variables
-
-Handling:
-
-* Spurious wakeups
-* Thundering herd problem
-* Efficient wake-up strategies (`notify_one` vs `notify_all`)
+* Ability to design **concurrent systems from scratch**
+* Understanding of **thread coordination and synchronization**
+* Awareness of **real-world failure modes (contention, overload, shutdown)**
 
 ---
 
-### 4. Shutdown Semantics
+## Final Note
 
-Designing a correct state machine:
-
-```text
-RUNNING → STOPPING → STOPPED
-```
-
----
-
-### 5. Memory Ordering & Visibility
-
-Understanding:
-
-* Happens-before relationships
-* Synchronization via mutex vs atomics
-
----
-
-## 📊 Performance Mindset
-
-Designed with:
-
-* **High throughput** (10k+ tasks/sec target)
-* **Low latency task dispatch**
-* **Scalability across multi-core systems (8–64 cores)**
-
----
-
-## 🧪 Build & Run
-
-### Prerequisites
-
-* GCC (C++20 support)
-* CMake ≥ 3.20
-
----
-
-### Build
-
-```bash
-mkdir build
-cd build
-cmake ..
-cmake --build .
-```
-
----
-
-### Run
-
-```bash
-./TaskScheduler.exe
-```
-
----
-
-## 📁 Project Structure
-
-```text
-cpp_TaskScheduler/
-│
-├── CMakeLists.txt
-├── README.md
-├── .gitignore
-├── .gitattributes
-│
-├── src/
-│   ├── main.cpp
-│   │
-│   ├── core/
-│   │   ├── SafeQueue.hpp
-│   │   ├── ThreadPool.hpp
-│   │   ├── Worker.hpp
-│   │
-│   ├── task/
-│   │   ├── Task.hpp
-│   │   ├── Result.hpp
-│   │
-│   ├── scheduler/
-│   │   ├── PriorityScheduler.hpp
-│   │
-│   ├── utils/
-│       ├── Logger.hpp
-│
-└── tests/
-    ├── StressTest.cpp
-```
-
----
-
-## 🧠 Key Learnings
-
-### 🔹 1. Concurrency is about correctness, not speed
-
-Naive implementations often:
-
-* work in single-thread
-* fail under contention
-
----
-
-### 🔹 2. Locking is easy — designing around locks is hard
-
-* Global mutex = bottleneck
-* Fine-grained control = complexity trade-off
-
----
-
-### 🔹 3. Condition variables are subtle
-
-Incorrect usage leads to:
-
-* deadlocks
-* missed signals
-* infinite waits
-
----
-
-### 🔹 4. Shutdown is the hardest part
-
-Handling:
-
-* in-flight tasks
-* waiting threads
-* new task submissions
-
----
-
-### 🔹 5. Atomics are not a silver bullet
-
-* Work for simple state
-* Break for complex structures (queues, graphs)
-
----
-
-## ⚖️ Design Trade-offs
-
-| Decision                 | Trade-off                             |
-| ------------------------ | ------------------------------------- |
-| Mutex-based queue        | Simpler, safe but contention-heavy    |
-| Lock-free queue (future) | High performance, complex correctness |
-| notify_one               | Efficient but requires careful logic  |
-| notify_all               | Safe but causes wake-up storms        |
-
----
-
-## 🚧 Future Improvements
-
-* Lock-free queue implementation
-* Work-stealing scheduler (per-thread queues)
-* Backpressure handling
-* Metrics (latency, throughput)
-* Benchmarking against existing thread pools
-
----
-
-## 🎯 Goal
-
-To evolve into a **production-grade concurrent system**, while building:
-
-* Strong systems intuition
-* Deep understanding of concurrency primitives
-* Interview-level reasoning for backend/system roles
-
----
-
-## 📌 Final Note
-
-This project is not about “making threads work”.
+This project is not about using threads.
 
 It is about:
 
-> building systems that remain correct under stress, scale, and failure.
+> building systems that remain correct under concurrency, stress, and failure - and understanding where they break.
