@@ -1,31 +1,35 @@
 #pragma once
-#include <functional>
+
 #include <memory>
 #include <type_traits>
 #include <utility>
 
+// Task is a type-erased callable wrapper.
+// - Stores any invocable object
+// - Move-only (non-copyable)
+// - Used by ThreadPool to execute heterogeneous tasks
+
 class Task {
   private:
-    // Type-erased interface
     struct ITask {
         virtual void execute() = 0;
-        virtual ~ITask() = default;
+        virtual ~ITask() noexcept = default;
     };
 
     // Concrete implementation of the task
     template <typename F> struct TaskImpl : ITask {
         F func;
-        template <typename fn> explicit TaskImpl(fn &&f) : func(std::forward<fn>(f)) {}
+
+        template <typename Fn> explicit TaskImpl(Fn &&f) : func(std::forward<Fn>(f)) {}
+
         void execute() override {
             func();
         }
     };
 
-    // storage
     std::unique_ptr<ITask> impl_;
 
   public:
-    // constructores
     Task() = default;
 
     Task(const Task &) = delete;
@@ -34,20 +38,20 @@ class Task {
     Task(Task &&) noexcept = default;
     Task &operator=(Task &&) noexcept = default;
 
-    // template constructor
-    template <typename F> Task(F &&f) {
+    template <typename F>
+        requires(!std::is_same_v<std::decay_t<F>, Task>)
+    explicit Task(F &&f) {
         using Decayed = std::decay_t<F>;
         impl_ = std::make_unique<TaskImpl<Decayed>>(std::forward<F>(f));
     }
 
-    // execute the task
+    // Executes the stored callable.
     void operator()() {
         if (impl_) {
             impl_->execute();
         }
     }
 
-    // validity check
     explicit operator bool() const {
         return static_cast<bool>(impl_);
     }

@@ -1,10 +1,9 @@
 #pragma once
+
 #include "core/SafeQueue.hpp"
 #include "task/Task.hpp"
 
-#include <functional>
 #include <iostream>
-#include <mutex>
 
 class Worker {
   private:
@@ -12,10 +11,11 @@ class Worker {
 
   public:
     explicit Worker(SafeQueue<Task> &queue) : queue_(queue) {}
+
     void operator()() {
         while (true) {
             auto task = queue_.pop();
-            if (!task.has_value()) {
+            if (!task) {
                 break; // shutdown signaled and queue is empty
             }
             try {
