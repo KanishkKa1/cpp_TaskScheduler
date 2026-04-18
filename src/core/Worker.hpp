@@ -1,16 +1,21 @@
 #pragma once
 
+#include "ThreadPool.hpp"
 #include "core/SafeQueue.hpp"
 #include "task/Task.hpp"
 
 #include <iostream>
 
+class ThreadPool; // Forward declaration to avoid circular dependency
+
 class Worker {
   private:
     SafeQueue<Task> &queue_;
+    ThreadPool *thread_pool_;
 
   public:
-    explicit Worker(SafeQueue<Task> &queue) : queue_(queue) {}
+    explicit Worker(SafeQueue<Task> &queue, ThreadPool *thread_pool)
+        : queue_(queue), thread_pool_(thread_pool) {}
 
     void operator()() {
         while (true) {
@@ -18,6 +23,7 @@ class Worker {
             if (!task) {
                 break; // shutdown signaled and queue is empty
             }
+            thread_pool_->on_task_start();
             try {
                 (*task)();
             } catch (const std::exception &e) {
@@ -26,6 +32,7 @@ class Worker {
             } catch (...) {
                 std::cerr << "Task threw an unknown exception." << std::endl;
             }
+            thread_pool_->on_task_end();
         }
     }
 };

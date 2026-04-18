@@ -19,6 +19,13 @@
 //     * allows consumers to drain remaining items
 //     * pop returns nullopt when empty after shutdown
 //
+// Invariants:
+// - Producers wait on not_full_ when queue is full
+// - Consumers wait on not_empty_ when queue is empty
+// - shutdown_ wakes all waiting threads
+// - No push is allowed after shutdown_
+// - pop() returns nullopt when shutdown_ && queue empty
+//
 // Notes:
 // - empty() and size() are snapshots and may be stale immediately.
 template <typename T> class SafeQueue {
@@ -94,6 +101,11 @@ template <typename T> class SafeQueue {
         return value;
     }
 
+    // NOTE:
+    // try_pop() returns nullopt if queue is empty.
+    // It does NOT distinguish between:
+    //   - empty queue
+    //   - shutdown + empty queue
     std::optional<T> try_pop() {
         std::unique_lock<std::mutex> lock(mutex_);
 

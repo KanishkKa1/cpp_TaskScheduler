@@ -15,6 +15,9 @@ class ThreadPool {
   private:
     SafeQueue<Task> task_queue_;
     std::vector<std::jthread> workers_;
+    std::atomic<size_t> active_workers_{0};
+    std::atomic<size_t> total_submitted_{0};
+    std::atomic<size_t> total_completed_{0};
 
   public:
     explicit ThreadPool(size_t num_threads);
@@ -34,7 +37,6 @@ class ThreadPool {
         using ReturnType = std::invoke_result_t<F, Args...>;
 
         auto promise_ptr = std::make_shared<std::promise<ReturnType>>();
-        auto future = promise_ptr->get_future();
 
         // Wrap user function into a task
         Task t(
@@ -56,6 +58,9 @@ class ThreadPool {
             throw std::runtime_error("ThreadPool is shutdown, cannot submit new tasks");
         }
 
+        total_submitted_++;
+
+        auto future = promise_ptr->get_future();
         return future;
     }
 
@@ -63,5 +68,30 @@ class ThreadPool {
 
     bool is_shutdown() const noexcept {
         return task_queue_.is_shutdown();
+    }
+
+    void on_task_start() noexcept {
+        active_workers_++;
+    }
+
+    void on_task_end() noexcept {
+        active_workers_--;
+        total_completed_++;
+    }
+
+    size_t pending_task() const {
+        return task_queue_.size();
+    }
+
+    size_t active_workers() const {
+        return active_workers_;
+    }
+
+    size_t total_submitted() const {
+        return total_submitted_;
+    }
+
+    size_t total_completed() const {
+        return total_completed_;
     }
 };
