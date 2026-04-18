@@ -6,33 +6,18 @@
 
 #include <iostream>
 
+inline thread_local int worker_id = -1;
+
 class ThreadPool; // Forward declaration to avoid circular dependency
 
 class Worker {
   private:
     SafeQueue<Task> &queue_;
     ThreadPool *thread_pool_;
+    int id_; // Thread Id
 
   public:
-    explicit Worker(SafeQueue<Task> &queue, ThreadPool *thread_pool)
-        : queue_(queue), thread_pool_(thread_pool) {}
+    explicit Worker(SafeQueue<Task> &queue, ThreadPool *thread_pool, int id);
 
-    void operator()() {
-        while (true) {
-            auto task = queue_.pop();
-            if (!task) {
-                break; // shutdown signaled and queue is empty
-            }
-            thread_pool_->on_task_start();
-            try {
-                (*task)();
-            } catch (const std::exception &e) {
-                // Prevent worker thread termination due to task exceptions.
-                std::cerr << "Task threw an exception: " << e.what() << std::endl;
-            } catch (...) {
-                std::cerr << "Task threw an unknown exception." << std::endl;
-            }
-            thread_pool_->on_task_end();
-        }
-    }
+    void operator()();
 };

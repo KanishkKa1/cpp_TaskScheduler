@@ -11,10 +11,22 @@
 #include <type_traits>
 #include <vector>
 
+// Represents per -worker state
+// Each worker has its own local deque for fast LIFO execution
+struct WorkerState {
+    std::deque<Task> local_queue;
+    std::mutex mutex;
+};
+
 class ThreadPool {
   private:
+    // Global task queue (bounded,thread-safe)
     SafeQueue<Task> task_queue_;
+
+    // Worker threads
     std::vector<std::jthread> workers_;
+
+    // Metrics
     std::atomic<size_t> active_workers_{0};
     std::atomic<size_t> total_submitted_{0};
     std::atomic<size_t> total_completed_{0};
