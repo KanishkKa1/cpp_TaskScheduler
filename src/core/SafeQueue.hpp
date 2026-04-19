@@ -1,4 +1,6 @@
 #pragma once
+
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <mutex>
@@ -36,8 +38,10 @@ template <typename T> class SafeQueue {
     std::condition_variable not_empty_; // consumers wait on this when queue is empty
     std::condition_variable not_full_;  // producers wait on this when queue is at capacity
 
-    bool shutdown_ = false;
+    std::atomic<bool> shutdown_{false};
+
     const size_t capacity_;
+    size_t size_ = 0;
 
   public:
     explicit SafeQueue(size_t capacity) : capacity_(capacity) {
@@ -52,18 +56,25 @@ template <typename T> class SafeQueue {
     SafeQueue(SafeQueue &&) = delete;
     SafeQueue &operator=(SafeQueue &&) = delete;
 
+    /**
+     * Blocking push with backpressure.
+     * Returns false if queue is shutdown.
+     */
     template <typename U> bool push(U &&value) {
         std::unique_lock<std::mutex> lock(mutex_);
 
-        not_full_.wait(lock, [this] { return queue_.size() < capacity_ || shutdown_; });
+        not_full_.wait(lock, [this] {
+            return size_ < capacity_ || shutdown_.load(std::memory_order_relaxed);
+        });
 
         if (shutdown_) {
             return false;
         }
 
         queue_.emplace(std::forward<U>(value));
-        lock.unlock();
+        ++size_;
 
+        lock.unlock();
         not_empty_.notify_one();
         return true;
     }
@@ -71,29 +82,39 @@ template <typename T> class SafeQueue {
     template <typename... Args> bool emplace(Args &&...args) {
         std::unique_lock<std::mutex> lock(mutex_);
 
-        not_full_.wait(lock, [this] { return queue_.size() < capacity_ || shutdown_; });
+        not_full_.wait(lock, [this] {
+            return size_ < capacity_ || shutdown_.load(std::memory_order_relaxed);
+        });
 
         if (shutdown_) {
             return false;
         }
 
         queue_.emplace(std::forward<Args>(args)...);
-        lock.unlock();
+        ++size_;
 
+        lock.unlock();
         not_empty_.notify_one();
         return true;
     }
 
+    /**
+     * Blocking pop.
+     * Returns nullopt if shutdown and queue is empty.
+     */
     std::optional<T> pop() {
         std::unique_lock<std::mutex> lock(mutex_);
-        not_empty_.wait(lock, [this] { return !queue_.empty() || shutdown_; });
 
-        if (queue_.empty()) {
+        not_empty_.wait(lock,
+                        [this] { return size_ > 0 || shutdown_.load(std::memory_order_relaxed); });
+
+        if (size_ == 0) {
             return std::nullopt;
         }
 
-        auto value = std::move(queue_.front());
+        T value = std::move(queue_.front());
         queue_.pop();
+        --size_;
 
         lock.unlock();
         not_full_.notify_one();
@@ -101,53 +122,49 @@ template <typename T> class SafeQueue {
         return value;
     }
 
-    // NOTE:
-    // try_pop() returns nullopt if queue is empty.
-    // It does NOT distinguish between:
-    //   - empty queue
-    //   - shutdown + empty queue
+    /**
+     * Non-blocking pop.
+     */
     std::optional<T> try_pop() {
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
 
-        if (queue_.empty()) {
+        if (size_ == 0) {
             return std::nullopt;
         }
 
-        auto value = std::move(queue_.front());
+        T value = std::move(queue_.front());
         queue_.pop();
+        --size_;
 
-        lock.unlock();
         not_full_.notify_one();
-
         return value;
     }
 
+    /**
+     * Shutdown queue:
+     * - wakes all waiting threads
+     * - prevents further pushes
+     */
     void shutdown() noexcept {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (shutdown_) {
-                return;
-            }
-            shutdown_ = true;
-        }
+        shutdown_.store(true, std::memory_order_relaxed);
+
         not_empty_.notify_all();
         not_full_.notify_all();
     }
 
-    bool is_shutdown() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return shutdown_;
-    }
-
-    // NOTE: This is a snapshot and may be stale immediately in concurrent use.
-    bool empty() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.empty();
+    bool is_shutdown() const noexcept {
+        return shutdown_.load(std::memory_order_relaxed);
     }
 
     // NOTE: This is a snapshot and may be stale immediately in concurrent use.
     size_t size() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.size();
+        return size_;
+    }
+
+    // NOTE: This is a snapshot and may be stale immediately in concurrent use.
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return size_ == 0;
     }
 };

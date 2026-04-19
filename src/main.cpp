@@ -7,74 +7,353 @@
 #include <thread>
 #include <vector>
 
+using namespace std::chrono_literals;
+
+// multiple producers submitting tasks
+const int NUM_PRODUCERS = 4;
+const int TASKS_PER_PRODUCER = 100;
+
 int main() {
-    std::cout << "Scheduler starting..\n";
+    std::cout << "=== ThreadPool Test Start ===\n";
 
     ThreadPool pool(4);
     std::vector<std::future<int>> futures;
+    futures.reserve(NUM_PRODUCERS * TASKS_PER_PRODUCER);
+
+    std::mutex future_mutex;
 
     std::mutex cout_mutex;
     std::atomic<bool> running{true};
 
-    // Thread to monitor pool status
-    std::thread monitor([&]() {
-        while (running) {
-            {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "Active Workers: " << pool.active_workers()
-                          << ", Pending Tasks: " << pool.pending_task()
-                          << ", Total Submitted: " << pool.total_submitted()
-                          << ", Total Completed: " << pool.total_completed() << "\n";
+    size_t submitted, completed, pending, active;
+    {
+        // 🔹 Monitor thread (observability)
+        std::thread monitor([&]() {
+            while (running.load(std::memory_order_relaxed)) {
+                {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cout << "[Monitor] Active=" << pool.active_workers()
+                              << " | Pending(global)=" << pool.pending_task()
+                              << " | Submitted=" << pool.total_submitted()
+                              << " | Completed=" << pool.total_completed() << "\n";
+                }
+                std::this_thread::sleep_for(500ms);
             }
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        });
+
+        // * Test 1: Basic correctness
+        // =======================
+        // for (int i = 0; i < 10; i++) {
+        //     futures.push_back(pool.submit([i]() {
+        //         std::this_thread::sleep_for(10ms);
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "Task " << i << " is running on thread " <<
+        //             std::this_thread::get_id()
+        //                       << "\n";
+        //         }
+        //         return i * i;
+        //     }));
+        // }
+
+        // * Test 2 - Large number of tasks
+        // =======================
+        // for (int i = 0; i < 1000; i++) {
+        //     futures.push_back(pool.submit([i, &cout_mutex]() {
+        //         std::this_thread::sleep_for(10ms);
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "Task " << i << " is running on thread " <<
+        //             std::this_thread::get_id()
+        //                       << "\n";
+        //         }
+        //         return i * i;
+        //     }));
+        // }
+
+        // * Test 3.A - Parent-child task relationships and waiting
+        // =======================
+        // Submit tasks for parent child demonstration
+        // for (int i = 0; i < 100; i++) {
+        //     futures.push_back(pool.submit([i, &pool, &cout_mutex]() {
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "Parent Task " << i << " is running on thread "
+        //                       << std::this_thread::get_id() << "\n";
+        //         }
+        //         for (int j = 0; j < 10; j++) {
+        //             pool.submit([i, j, &cout_mutex]() {
+        //                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        //                 std::lock_guard<std::mutex> lock(cout_mutex);
+        //                 std::cout << "  Child Task " << i << "." << j << " is running on thread "
+        //                           << std::this_thread::get_id() << "\n";
+        //             });
+        //         }
+        //         return i * i;
+        //     }));
+        // }
+
+        // *Test 3.B - Parent-child task relationships with parent waiting for children to complete
+        // =======================
+        // sample test prent wait for child
+        // for (int i = 0; i < 10; i++) {
+        //     futures.push_back(pool.submit([i, &pool, &cout_mutex]() {
+        //         std::vector<std::future<int>> child_futures;
+        //         for (int j = 0; j < 10; j++) {
+        //             child_futures.push_back(pool.submit([i, j]() {
+        //                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        //                 return i + j;
+        //             }));
+        //         }
+        //         int sum = 0;
+        //         for (auto &f : child_futures) {
+        //             while (f.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+        //             {
+        //                 pool.help_one_task();
+        //             }
+        //             sum += f.get();
+        //         }
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "Parent Task " << i << " sum = " << sum << "\n";
+        //         }
+        //         return sum;
+        //     }));
+        // }
+
+        // * Test 4 -Imbalanced workload (stealing)
+        // =======================
+        // for (int i = 0; i < 100; i++) {
+        //     pool.submit([i, &cout_mutex]() {
+        //         if (i == 0) {
+        //             {
+        //                 std::lock_guard<std::mutex> lock(cout_mutex);
+        //                 std::cout << "Heavy Task started on thread " <<
+        //                 std::this_thread::get_id()
+        //                           << "\n";
+        //             }
+        //             std::this_thread::sleep_for(2s);
+        //             {
+        //                 std::lock_guard<std::mutex> lock(cout_mutex);
+        //                 std::cout << "Heavy Task finished\n";
+        //             }
+        //         } else {
+        //             std::this_thread::sleep_for(10ms);
+        //             {
+        //                 std::lock_guard<std::mutex> lock(cout_mutex);
+        //                 std::cout << "Light Task " << i << " on thread " <<
+        //                 std::this_thread::get_id()
+        //                           << "\n";
+        //             }
+        //         }
+        //     });
+        // }
+
+        // * Test 5 - Small Lambda tasks to demonstrate inline storage optimization
+        // Submit small lambda tasks to demonstrate inline storage
+        // for (int i = 0; i < 10; i++) {
+        //     futures.push_back(pool.submit([] { return 42; }));
+        // }
+
+        // * Test 6 - Large Lambda tasks to demonstrate heap allocation fallback
+        // Submit large lambda tasks to demonstrate heap allocation
+        // for (int i = 0; i < 10; i++) {
+        //     futures.push_back(pool.submit([i, &cout_mutex]() {
+        //         std::vector<int> big(10000, i);
+        //         int sum = 0;
+        //         for (int x : big)
+        //             sum += x;
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "Task " << i << " sum = " << sum << "\n";
+        //         }
+        //         return sum;
+        //     }));
+        // }
+
+        // * Test 7 - Move-heavy tasks to demonstrate move semantics in Task and ThreadPool
+        // Submit move-heavy tasks to demonstrate move semantics
+        // for (int i = 0; i < 20; i++) {
+        //     std::vector<int> data(10000, i);
+        //     futures.push_back(pool.submit([v = std::move(data), i, &cout_mutex]() mutable {
+        //         long long sum = 0;
+        //         for (int x : v)
+        //             sum += x;
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "Task " << i << " sum = " << sum << " (size=" << v.size() <<
+        //             ")\n";
+        //         }
+        //         return static_cast<int>(sum);
+        //     }));
+        // }
+
+        // * Test 8 - Shutdown while tasks Running
+        // for (int i = 0; i < 50; i++) {
+        //     pool.submit([i, &cout_mutex]() {
+        //         std::this_thread::sleep_for(100ms);
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "Task " << i << " is running on thread "
+        //                       << std::this_thread::get_id() << "\n";
+        //         }
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "Task " << i << " done\n";
+        //     });
+        // }
+        // std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        // * Test 9 - Multiple producers submitting tasks concurrently
+        // std::vector<std::thread> producers;
+        // for (int p = 0; p < NUM_PRODUCERS; p++) {
+        //     producers.emplace_back([p, &pool, &futures, &future_mutex, &cout_mutex]() {
+        //         for (int i = 0; i < TASKS_PER_PRODUCER; i++) {
+        //             auto future = pool.submit([p, i, &cout_mutex]() {
+        //                 std::this_thread::sleep_for(10ms);
+        //                 {
+        //                     std::lock_guard<std::mutex> lock(cout_mutex);
+        //                     std::cout << "Producer " << p << " Task " << i
+        //                               << " is running on thread " << std::this_thread::get_id()
+        //                               << "\n";
+        //                 }
+        //                 return p * 1000000 + i;
+        //             });
+        //             {
+        //                 std::lock_guard<std::mutex> lock(future_mutex);
+        //                 futures.push_back(std::move(future));
+        //             }
+        //         }
+        //     });
+        // }
+        // for (auto &t : producers) {
+        //     t.join();
+        // }
+
+        // * Test 10 - continuous submission
+        // std::atomic<bool> stop(false);
+        // std::thread producer([&]() {
+        //     while (!stop.load(std::memory_order_relaxed)) {
+        //         auto future = pool.submit([]() {
+        //             std::this_thread::sleep_for(10ms);
+        //             return 42;
+        //         });
+        //         {
+        //             std::lock_guard<std::mutex> lock(future_mutex);
+        //             futures.push_back(std::move(future));
+        //         }
+        //     }
+        // });
+        // // Let system run under continuous load
+        // std::this_thread::sleep_for(2s);
+        // // Stop producer
+        // stop.store(true);
+        // producer.join();
+        // // Give workers time to drain remaining tasks
+        // std::this_thread::sleep_for(1s);
+
+        // Test 11 — Throwing tasks
+        // =======================
+
+        // 1. Normal tasks
+        for (int i = 0; i < 5; i++) {
+            futures.push_back(pool.submit([i]() { return i * 10; }));
         }
-    });
 
-    // Submit tasks
-    for (int i = 0; i < 10; i++) {
-        futures.push_back(pool.submit([i, &cout_mutex]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (i % 3)));
+        // 2. Throwing tasks
+        for (int i = 0; i < 5; i++) {
+            futures.push_back(
+                pool.submit([]() -> int { throw std::runtime_error("Intentional failure"); }));
+        }
 
-            {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "Task " << i << " is running on thread " << std::this_thread::get_id()
-                          << "\n";
-            }
+        //  log results in cli
+        // for (size_t i = 0; i < futures.size(); ++i) {
+        //     try {
+        //         int result = futures[i].get();
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "Task " << i << " -> Result: " << result << "\n";
+        //         }
+        //     } catch (const std::exception &e) {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "Task " << i << " -> Error: " << e.what() << "\n";
+        //     }
+        // }
 
-            return i * i;
-        }));
-    }
+        // log results in cli for multiple producers
+        // size_t success = 0;
+        // for (auto &f : futures) {
+        //     try {
+        //         f.get();
+        //         success++;
+        //     } catch (...) {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "Future exception!\n";
+        //     }
+        // }
+        // {
+        //     std::lock_guard<std::mutex> lock(cout_mutex);
+        //     std::cout << "Validated: " << success << " / " << futures.size() << "\n";
+        // }
 
-    for (int i = 0; i < futures.size(); ++i) {
-        try {
-            int result = futures[i].get();
+        // log the error results in cli for throwing tasks
+        // Test 11 — Throwing tasks
+        // =======================
 
-            {
+        std::vector<std::future<int>> futures;
+
+        // 1. Normal tasks
+        for (int i = 0; i < 5; i++) {
+            futures.push_back(pool.submit([i]() { return i * 10; }));
+        }
+
+        // 2. Throwing tasks
+        for (int i = 0; i < 5; i++) {
+            futures.push_back(
+                pool.submit([]() -> int { throw std::runtime_error("Intentional failure"); }));
+        }
+
+        // Process results (CRITICAL)
+        // =======================
+
+        for (size_t i = 0; i < futures.size(); ++i) {
+            try {
+                int result = futures[i].get();
+
                 std::lock_guard<std::mutex> lock(cout_mutex);
                 std::cout << "Task " << i << " -> Result: " << result << "\n";
+
+            } catch (const std::exception &e) {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << "Task " << i << " -> Exception: " << e.what() << "\n";
             }
-
-        } catch (const std::exception &e) {
-            std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "Task " << i << " -> Error: " << e.what() << "\n";
         }
+
+        // Shutdown the thread pool
+        pool.shutdown();
+
+        // wait for completion
+        while (!pool.is_idle()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        // stop monitor thread
+        running.store(false, std::memory_order_relaxed);
+        monitor.join();
+
+        // Capture final metrics after shutdown
+        submitted = pool.total_submitted();
+        completed = pool.total_completed();
+        pending = pool.pending_task();
+        active = pool.active_workers();
+
+        // Final metrics
+        std::cout << "===Final Metrics====\n";
+        std::cout << "Submitted: " << submitted << "\n";
+        std::cout << "Completed: " << completed << "\n";
+        std::cout << "Pending: " << pending << "\n";
+        std::cout << "Active: " << active << "\n";
+
+        std::cout << "=== ThreadPool Test End ===\n";
+        return 0;
     }
-
-    // stop monitor thread
-    running = false;
-    monitor.join();
-
-    pool.shutdown();
-
-    {
-        std::lock_guard<std::mutex> lock(cout_mutex);
-        std::cout << "All tasks completed. Shutting down the pool...\n";
-        std::cout << "\nFinal Metrics:\n";
-        std::cout << "Submitted: " << pool.total_submitted() << "\n";
-        std::cout << "Completed: " << pool.total_completed() << "\n";
-        std::cout << "Pending: " << pool.pending_task() << "\n";
-        std::cout << "Active: " << pool.active_workers() << "\n";
-    }
-
-    return 0;
 }

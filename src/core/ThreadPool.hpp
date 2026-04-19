@@ -8,6 +8,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -45,6 +46,10 @@ class ThreadPool {
 
     // Prevent unbounded growth of local queues
     static constexpr size_t LOCAL_QUEUE_THREASHOLD = 64;
+
+    // For cooperative execution (helping)
+    std::atomic<size_t> total_inflight_{0};
+
   public:
     explicit ThreadPool(size_t num_threads);
 
@@ -115,7 +120,7 @@ class ThreadPool {
             }
         } else {
             // External thread → always use global queue
-        if (!task_queue_.push(std::move(t))) {
+            if (!task_queue_.push(std::move(t))) {
                 throw std::runtime_error("ThreadPool is shutdown. Cannot submit new tasks.");
             }
         }
@@ -140,6 +145,7 @@ class ThreadPool {
     void on_task_end() noexcept {
         active_workers_.fetch_sub(1, std::memory_order_relaxed);
         total_completed_.fetch_add(1, std::memory_order_relaxed);
+        total_inflight_.fetch_sub(1, std::memory_order_relaxed);
     }
 
     // Observable APIs
@@ -170,4 +176,8 @@ class ThreadPool {
 
     // Cooperative execution (helps avoid idle spinning)
     void help_one_task();
+
+    bool is_idle() const noexcept {
+        return total_inflight_.load(std::memory_order_relaxed) == 0;
+    }
 };
