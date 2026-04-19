@@ -167,4 +167,7 @@ class ThreadPool {
     // Work stealing APIs
     bool try_steal_task(int thief_id, Task &stolen_task);
     bool try_steal_tasks_batch(int thief_id, std::vector<Task> &stolen_tasks);
+
+    // Cooperative execution (helps avoid idle spinning)
+    void help_one_task();
 };

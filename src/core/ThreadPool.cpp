@@ -92,3 +92,63 @@ bool ThreadPool::try_steal_tasks_batch(int thief_id, std::vector<Task> &stolen_t
 
     return false;
 }
+
+/**
+ * Cooperative execution helper.
+ *
+ * Execution priority:
+ * 1. Local queue (LIFO)
+ * 2. Steal from others
+ * 3. Global queue
+ * 4. Yield (avoid busy spin)
+ */
+void ThreadPool::help_one_task() {
+    if (worker_id == -1) {
+        return;
+    }
+
+    auto &state = get_worker_state(worker_id);
+
+    Task task;
+
+    // 1. Try local queue (fast path, LIFO)
+    if (state.mutex.try_lock()) {
+        if (!state.local_queue.empty()) {
+            task = std::move(state.local_queue.back());
+            state.local_queue.pop_back();
+            state.mutex.unlock();
+
+            on_task_start();
+            task();
+            on_task_end();
+
+            return;
+        }
+
+        state.mutex.unlock();
+    }
+
+    // 2. Try batch stealing
+    std::vector<Task> stolen;
+    if (try_steal_tasks_batch(worker_id, stolen)) {
+        for (auto &t : stolen) {
+            on_task_start();
+            t();
+            on_task_end();
+        }
+        return;
+    }
+
+    // 3. Try global queue
+    auto opt = task_queue_.try_pop();
+    if (opt) {
+        on_task_start();
+        (*opt)();
+        on_task_end();
+
+        return;
+    }
+
+    // 4. No work available → yield CPU
+    std::this_thread::yield();
+}
