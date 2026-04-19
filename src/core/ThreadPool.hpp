@@ -106,4 +106,8 @@ class ThreadPool {
     size_t total_completed() const {
         return total_completed_;
     }
+
+    // Work stealing APIs
+    bool try_steal_task(int thief_id, Task &stolen_task);
+    bool try_steal_tasks_batch(int thief_id, std::vector<Task> &stolen_tasks);
 };
