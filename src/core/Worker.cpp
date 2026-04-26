@@ -2,33 +2,37 @@
 
 #include "ThreadPool.hpp"
 
+#include <chrono>
 #include <thread>
 
-/**
- * Constructor
- */
-Worker::Worker(SafeQueue<Task> &queue, ThreadPool *thread_pool, int id)
-    : queue_(queue), thread_pool_(thread_pool), id_(id) {}
+// Thread-local worker id definition
+thread_local int worker_id = -1;
 
-/**
- * Worker thread main loop.
- *
- * Responsibilities:
- * - Assign thread-local worker_id
- * - Continuously execute tasks via ThreadPool scheduling
- * - Exit when shutdown is signaled AND no work remains
- */
+// =======================
+// Constructor
+// =======================
+Worker::Worker(ThreadPool &thread_pool, int id) : thread_pool_(thread_pool), id_(id) {}
+
+// =======================
+// Worker execution loop
+// =======================
 void Worker::operator()() {
-    // Set thread-local identity
+    // Assign thread-local identity
     worker_id = id_;
 
     while (true) {
-        thread_pool_->help_one_task();
+        // Execute one unit of work
+        thread_pool_.help_one_task();
 
-        if (thread_pool_->is_shutdown() && thread_pool_->is_idle()) {
+        // Exit condition
+        if (thread_pool_.is_shutdown() && thread_pool_.is_idle()) {
             break;
         }
 
-        std::this_thread::yield();
+        // Controlled backoff (prevents CPU spinning)
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
+
+    // Reset thread-local state
+    worker_id = -1;
 }

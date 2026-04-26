@@ -1,17 +1,15 @@
 #pragma once
 
-#include <cstring>
-#include <memory>
 #include <new>
 #include <type_traits>
 #include <utility>
 
-// Type-erased, move-only task wrapper with small buffer optimization
+// Type-erased, move-only task with small buffer optimization
 class Task {
   private:
     static constexpr size_t INLINE_SIZE = 64;
 
-    alignas(std::max_align_t) char inline_buffer_[INLINE_SIZE];
+    alignas(std::max_align_t) unsigned char buffer_[INLINE_SIZE];
 
     void (*invoke_)(void *) = nullptr;
     void (*destroy_)(void *) = nullptr;
@@ -19,103 +17,121 @@ class Task {
 
     bool is_heap_ = false;
 
+    void reset() noexcept {
+        if (destroy_) {
+            destroy_(buffer_);
+        }
+        invoke_ = nullptr;
+        destroy_ = nullptr;
+        move_ = nullptr;
+        is_heap_ = false;
+    }
+
   public:
     Task() = default;
 
     Task(const Task &) = delete;
     Task &operator=(const Task &) = delete;
 
+    // =======================
+    // Move Constructor
+    // =======================
     Task(Task &&other) noexcept {
         if (other.invoke_) {
-            other.move_(other.inline_buffer_, inline_buffer_);
+            other.move_(other.buffer_, buffer_);
 
             invoke_ = other.invoke_;
             destroy_ = other.destroy_;
             move_ = other.move_;
             is_heap_ = other.is_heap_;
 
-            other.invoke_ = nullptr;
-            other.destroy_ = nullptr;
-            other.move_ = nullptr;
-            other.is_heap_ = false;
+            other.reset();
         }
     }
 
+    // =======================
+    // Move Assignment
+    // =======================
     Task &operator=(Task &&other) noexcept {
         if (this != &other) {
-            if (destroy_) {
-                destroy_(inline_buffer_);
-            }
+            reset();
 
             if (other.invoke_) {
-                other.move_(other.inline_buffer_, inline_buffer_);
+                other.move_(other.buffer_, buffer_);
 
                 invoke_ = other.invoke_;
                 destroy_ = other.destroy_;
                 move_ = other.move_;
                 is_heap_ = other.is_heap_;
 
-                other.invoke_ = nullptr;
-                other.destroy_ = nullptr;
-                other.move_ = nullptr;
-                other.is_heap_ = false;
+                other.reset();
             }
         }
         return *this;
     }
 
+    // =======================
+    // Constructor
+    // =======================
     template <typename F>
         requires(!std::is_same_v<std::decay_t<F>, Task>)
     explicit Task(F &&f) {
-        using Decayed = std::decay_t<F>;
+        using T = std::decay_t<F>;
 
-        if constexpr (sizeof(Decayed) <= INLINE_SIZE) {
-            // Inline buffer storage
-            new (inline_buffer_) Decayed(std::forward<F>(f));
+        if constexpr (sizeof(T) <= INLINE_SIZE) {
+            // Inline storage
+            new (buffer_) T(std::forward<F>(f));
 
-            invoke_ = [](void *ptr) { (*reinterpret_cast<Decayed *>(ptr))(); };
+            invoke_ = [](void *ptr) { (*reinterpret_cast<T *>(ptr))(); };
 
-            destroy_ = [](void *ptr) { reinterpret_cast<Decayed *>(ptr)->~Decayed(); };
+            destroy_ = [](void *ptr) { reinterpret_cast<T *>(ptr)->~T(); };
 
             move_ = [](void *src, void *dst) {
-                new (dst) Decayed(std::move(*reinterpret_cast<Decayed *>(src)));
+                T *src_obj = reinterpret_cast<T *>(src);
+                new (dst) T(std::move(*src_obj));
+                src_obj->~T();
             };
 
             is_heap_ = false;
         } else {
             // Heap storage
-            Decayed *heap_obj = new Decayed(std::forward<F>(f));
-            *reinterpret_cast<Decayed **>(inline_buffer_) = heap_obj;
+            T *heap_obj = new T(std::forward<F>(f));
+            *reinterpret_cast<T **>(buffer_) = heap_obj;
 
             invoke_ = [](void *ptr) {
-                Decayed *obj = *reinterpret_cast<Decayed **>(ptr);
+                T *obj = *reinterpret_cast<T **>(ptr);
                 (*obj)();
             };
 
             destroy_ = [](void *ptr) {
-                Decayed *obj = *reinterpret_cast<Decayed **>(ptr);
+                T *obj = *reinterpret_cast<T **>(ptr);
                 delete obj;
             };
 
             move_ = [](void *src, void *dst) {
-                *reinterpret_cast<Decayed **>(dst) = *reinterpret_cast<Decayed **>(src);
+                T *&src_ptr = *reinterpret_cast<T **>(src);
+                *reinterpret_cast<T **>(dst) = src_ptr;
+                src_ptr = nullptr;
             };
 
             is_heap_ = true;
         }
     }
 
-    // Executes the stored callable.
+    // =======================
+    // Invoke
+    // =======================
     void operator()() {
         if (invoke_) {
-            invoke_(inline_buffer_);
+            invoke_(buffer_);
         }
     }
 
+    // =======================
+    // Destructor
+    // =======================
     ~Task() noexcept {
-        if (destroy_) {
-            destroy_(inline_buffer_);
-        }
+        reset();
     }
 
     explicit operator bool() const {

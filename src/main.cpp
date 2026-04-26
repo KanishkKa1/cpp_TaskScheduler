@@ -28,8 +28,8 @@ int main() {
     size_t submitted, completed, pending, active;
     {
         // 🔹 Monitor thread (observability)
-        std::thread monitor([&]() {
-            while (running.load(std::memory_order_relaxed)) {
+        std::jthread monitor([&](std::stop_token st) {
+            while (!st.stop_requested()) {
                 {
                     std::lock_guard<std::mutex> lock(cout_mutex);
                     std::cout << "[Monitor] Active=" << pool.active_workers()
@@ -251,19 +251,19 @@ int main() {
         // // Give workers time to drain remaining tasks
         // std::this_thread::sleep_for(1s);
 
-        // Test 11 — Throwing tasks
+        // * Test 11 — Throwing tasks
         // =======================
 
         // 1. Normal tasks
-        for (int i = 0; i < 5; i++) {
-            futures.push_back(pool.submit([i]() { return i * 10; }));
-        }
+        // for (int i = 0; i < 5; i++) {
+        //     futures.push_back(pool.submit([i]() { return i * 10; }));
+        // }
 
         // 2. Throwing tasks
-        for (int i = 0; i < 5; i++) {
-            futures.push_back(
-                pool.submit([]() -> int { throw std::runtime_error("Intentional failure"); }));
-        }
+        // for (int i = 0; i < 5; i++) {
+        //     futures.push_back(
+        //         pool.submit([]() -> int { throw std::runtime_error("Intentional failure"); }));
+        // }
 
         //  log results in cli
         // for (size_t i = 0; i < futures.size(); ++i) {
@@ -298,47 +298,163 @@ int main() {
         // log the error results in cli for throwing tasks
         // Test 11 — Throwing tasks
         // =======================
-
-        std::vector<std::future<int>> futures;
+        // std::vector<std::future<int>> futures;
 
         // 1. Normal tasks
-        for (int i = 0; i < 5; i++) {
-            futures.push_back(pool.submit([i]() { return i * 10; }));
-        }
+        // for (int i = 0; i < 5; i++) {
+        //     futures.push_back(pool.submit([i]() { return i * 10; }));
+        // }
 
         // 2. Throwing tasks
-        for (int i = 0; i < 5; i++) {
-            futures.push_back(
-                pool.submit([]() -> int { throw std::runtime_error("Intentional failure"); }));
+        // for (int i = 0; i < 5; i++) {
+        //     futures.push_back(
+        //         pool.submit([]() -> int { throw std::runtime_error("Intentional failure"); }));
+        // }
+
+        // * Test 12 - Priority Test
+        // =======================
+        // std::vector<std::future<int>> futures;
+        // futures.reserve(12);
+        // std::cout << "\n=== Priority Test Start ===\n";
+        // // 1. LOW priority tasks (block workers)
+        // for (int i = 0; i < 4; i++) {
+        //     futures.push_back(pool.submit_with_priority(1, [i, &cout_mutex]() {
+        //         std::this_thread::sleep_for(500ms);
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "[LOW] Task " << i << " done\n";
+        //         return i;
+        //     }));
+        // }
+        // // ensure workers are busy
+        // std::this_thread::sleep_for(50ms);
+        // // 2. HIGH priority tasks
+        // for (int i = 0; i < 4; i++) {
+        //     futures.push_back(pool.submit_with_priority(10, [i, &cout_mutex]() {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "[HIGH] Task " << i << " done\n";
+        //         return i;
+        //     }));
+        // }
+        // // 3. More LOW priority tasks
+        // for (int i = 4; i < 8; i++) {
+        //     futures.push_back(pool.submit_with_priority(1, [i, &cout_mutex]() {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "[LOW] Task " << i << " done\n";
+        //         return i;
+        //     }));
+        // }
+
+        // * Test 13 - Priority Test with continuous submission
+        // std::vector<std::future<int>> futures;
+        // std::mutex cout_mutex;
+        // std::cout << "\n=== Priority Stress Test (Burst) ===\n";
+        // // Large LOW batch
+        // for (int i = 0; i < 100; i++) {
+        //     futures.push_back(pool.submit_with_priority(1, [i, &cout_mutex]() {
+        //         std::this_thread::sleep_for(5ms);
+        //         {
+        //             std::lock_guard<std::mutex> lock(cout_mutex);
+        //             std::cout << "[LOW] " << i << "\n";
+        //         }
+        //         return i;
+        //     }));
+        // }
+        // Let system fill
+        // std::this_thread::sleep_for(50ms);
+        // Inject HIGH priority burst
+        // for (int i = 0; i < 20; i++) {
+        //     futures.push_back(pool.submit_with_priority(100, [i, &cout_mutex]() {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "[HIGH] " << i << "\n";
+        //         return i;
+        //     }));
+        // }
+
+        // * Test 14 — Mixed Streaming
+        // std::vector<std::future<int>> futures;
+        // std::mutex cout_mutex;
+        // std::cout << "\n=== Mixed Priority Streaming Test ===\n";
+        // for (int i = 0; i < 200; i++) {
+        //     int pr = (i % 10 == 0) ? 100 : 1;
+        //     futures.push_back(pool.submit_with_priority(pr, [i, pr, &cout_mutex]() {
+        //         std::this_thread::sleep_for(2ms);
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         if (pr == 100)
+        //             std::cout << "[HIGH] Task " << i << "\n";
+        //         else
+        //             std::cout << "[LOW] Task " << i << "\n";
+        //         return i;
+        //     }));
+        // }
+
+        // * Test 15 — Stealing conflict
+        std::vector<std::future<int>> futures;
+        std::mutex cout_mutex;
+        std::cout << "\n=== Priority vs Stealing Conflict Test ===\n";
+        // One heavy LOW task to create imbalance
+        futures.push_back(pool.submit_with_priority(1, [&cout_mutex]() {
+            {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << "[LOW-HEAVY] started\n";
+            }
+            std::this_thread::sleep_for(1s);
+            return 0;
+        }));
+        // Many small LOW tasks
+        for (int i = 0; i < 50; i++) {
+            futures.push_back(pool.submit_with_priority(1, [] {
+                std::this_thread::sleep_for(10ms);
+                return 1;
+            }));
+        }
+        // Inject HIGH tasks mid-way
+        std::this_thread::sleep_for(100ms);
+        for (int i = 0; i < 10; i++) {
+            futures.push_back(pool.submit_with_priority(100, [i, &cout_mutex]() {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << "[HIGH] " << i << "\n";
+                return i;
+            }));
         }
 
-        // Process results (CRITICAL)
         // =======================
-
-        for (size_t i = 0; i < futures.size(); ++i) {
+        // Wait for all tasks
+        // =======================
+        for (auto &f : futures) {
             try {
-                int result = futures[i].get();
-
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "Task " << i << " -> Result: " << result << "\n";
-
+                f.get();
             } catch (const std::exception &e) {
                 std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "Task " << i << " -> Exception: " << e.what() << "\n";
+                std::cout << "Exception: " << e.what() << "\n";
             }
         }
 
-        // Shutdown the thread pool
-        pool.shutdown();
+        std::cout << "=== Priority Test End ===\n";
 
-        // wait for completion
+        // Process results (CRITICAL)
+        // =======================
+        // for (size_t i = 0; i < futures.size(); ++i) {
+        //     try {
+        //         int result = futures[i].get();
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "Task " << i << " -> Result: " << result << "\n";
+        //     } catch (const std::exception &e) {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "Task " << i << " -> Exception: " << e.what() << "\n";
+        //     }
+        // }
+
+        // =======================
+        // Shutdown & Drain
+        // =======================
+        pool.shutdown();
         while (!pool.is_idle()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(10ms);
         }
 
-        // stop monitor thread
-        running.store(false, std::memory_order_relaxed);
-        monitor.join();
+        // // stop monitor thread
+        // running.store(false, std::memory_order_relaxed);
+        // monitor.join();
 
         // Capture final metrics after shutdown
         submitted = pool.total_submitted();
@@ -346,7 +462,9 @@ int main() {
         pending = pool.pending_task();
         active = pool.active_workers();
 
-        // Final metrics
+        // =======================
+        // Final Metrics
+        // =======================
         std::cout << "===Final Metrics====\n";
         std::cout << "Submitted: " << submitted << "\n";
         std::cout << "Completed: " << completed << "\n";

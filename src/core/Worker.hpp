@@ -1,23 +1,20 @@
 #pragma once
 
-#include "ThreadPool.hpp"
-#include "core/SafeQueue.hpp"
-#include "task/Task.hpp"
+class ThreadPool; // forward declaration
 
-#include <iostream>
+// Thread-local worker identifier (declared only)
+extern thread_local int worker_id;
 
-inline thread_local int worker_id = -1;
-
-class ThreadPool; // Forward declaration to avoid circular dependency
-
+// =======================
+// Worker
+// =======================
 class Worker {
   private:
-    SafeQueue<Task> &queue_;
-    ThreadPool *thread_pool_;
-    int id_; // Thread Id
+    ThreadPool &thread_pool_;
+    int id_;
 
   public:
-    explicit Worker(SafeQueue<Task> &queue, ThreadPool *thread_pool, int id);
+    explicit Worker(ThreadPool &thread_pool, int id);
 
     void operator()();
 };

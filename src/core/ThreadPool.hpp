@@ -3,125 +3,119 @@
 #include "core/SafeQueue.hpp"
 #include "task/Task.hpp"
 
-#include <cassert>
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <future>
-#include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <vector>
 
-// Thread local worker identifier.
-// - Set by worker on thread start
+// =======================
+// Thread-local worker id
+// =======================
 extern thread_local int worker_id;
 
-// Represents per -worker state
-// Each worker has its own local deque for fast LIFO execution
+// =======================
+// Scheduled Task (priority metadata)
+// =======================
+struct ScheduledTask {
+    int priority;
+    Task task;
+};
+
+// =======================
+// Worker State
+// =======================
 struct WorkerState {
-    std::deque<Task> local_queue;
+    std::deque<ScheduledTask> local_queue;
     std::mutex mutex;
 };
 
+// =======================
+// ThreadPool
+// =======================
 class ThreadPool {
   private:
-    // Global task queue (bounded,thread-safe)
-    SafeQueue<Task> task_queue_;
+    // Global FIFO queue (NOT priority queue)
+    SafeQueue<ScheduledTask> task_queue_;
 
-    // Worker threads
-    std::vector<std::jthread> workers_;
+    std::vector<std::thread> workers_;
+    std::vector<WorkerState> worker_states_;
 
-    // Metrics
+    // Metrics (observability only)
     std::atomic<size_t> active_workers_{0};
     std::atomic<size_t> total_submitted_{0};
     std::atomic<size_t> total_completed_{0};
-
-    // Per-worker local queues for work stealing
-    std::vector<WorkerState> worker_states_;
-
-    // Maximum number of tasks to steal in one batch
-    static constexpr size_t MAX_STEAL_BATCH = 4;
-
-    // Prevent unbounded growth of local queues
-    static constexpr size_t LOCAL_QUEUE_THREASHOLD = 64;
-
-    // For cooperative execution (helping)
     std::atomic<size_t> total_inflight_{0};
+
+    static constexpr size_t MAX_STEAL_BATCH = 4;
+    static constexpr size_t LOCAL_QUEUE_THRESHOLD = 64;
 
   public:
     explicit ThreadPool(size_t num_threads);
+    ~ThreadPool() noexcept;
 
     ThreadPool(const ThreadPool &) = delete;
     ThreadPool &operator=(const ThreadPool &) = delete;
 
-    ~ThreadPool() noexcept;
+    // =======================
+    // SUBMIT (default priority)
+    // =======================
+    template <typename F, typename... Args> auto submit(F &&f, Args &&...args) {
+        return submit_with_priority(0, std::forward<F>(f), std::forward<Args>(args)...);
+    }
 
-    /**
-     * Submit a task to the thread pool.
-     *
-     * Key properties:
-     * - Supports arbitrary callable + arguments
-     * - Returns std::future for result retrieval
-     * - Exceptions are propagated via promise
-     *
-     * Scheduling strategy:
-     * - Worker thread → push to local queue (fast path)
-     * - External thread → push to global queue
-     * - If local queue overloaded → fallback to global queue
-     */
+    // =======================
+    // SUBMIT WITH PRIORITY
+    // =======================
     template <typename F, typename... Args>
-    auto submit(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, Args...>> {
+    auto submit_with_priority(int priority, F &&f, Args &&...args)
+        -> std::future<std::invoke_result_t<F, Args...>> {
 
         using ReturnType = std::invoke_result_t<F, Args...>;
 
         auto promise_ptr = std::make_shared<std::promise<ReturnType>>();
 
-        // Wrap user function into a task abstraction
-        Task t(
-            [f_ = std::forward<F>(f), ... args_ = std::forward<Args>(args), promise_ptr]() mutable {
-                try {
-                    if constexpr (std::is_void_v<ReturnType>) {
-                        std::invoke(f_, std::move(args_)...);
-                        promise_ptr->set_value();
-                    } else {
-                        auto result = std::invoke(f_, std::move(args_)...);
-                        promise_ptr->set_value(std::move(result));
-                    }
-                } catch (...) {
-                    promise_ptr->set_exception(std::current_exception());
-                }
-            });
+        ScheduledTask st{priority,
+                         Task([f_ = std::forward<F>(f), ... args_ = std::forward<Args>(args),
+                               promise_ptr]() mutable {
+                             try {
+                                 if constexpr (std::is_void_v<ReturnType>) {
+                                     std::invoke(f_, std::move(args_)...);
+                                     promise_ptr->set_value();
+                                 } else {
+                                     promise_ptr->set_value(std::invoke(f_, std::move(args_)...));
+                                 }
+                             } catch (...) {
+                                 promise_ptr->set_exception(std::current_exception());
+                             }
+                         })};
 
-        // Ensure worker_id validity
-        assert(worker_id < (int)worker_states_.size());
+        // Worker thread → local queue (fast path)
+        if (worker_id >= 0 && worker_id < (int)worker_states_.size()) {
+            auto &state = worker_states_[worker_id];
 
-        if (worker_id != -1) {
-            // Submission for worker thread - try push to local queue
-            auto &state = get_worker_state(worker_id);
-
-            bool pushed_to_local = false;
-
+            bool pushed_local = false;
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
-                // Prevent unbounded loacl queue growth
-                if (state.local_queue.size() < LOCAL_QUEUE_THREASHOLD) {
-                    state.local_queue.push_back(std::move(t));
-                    pushed_to_local = true;
+                if (state.local_queue.size() < LOCAL_QUEUE_THRESHOLD) {
+                    state.local_queue.push_back(std::move(st));
+                    pushed_local = true;
                 }
             }
 
-            // Fallback to global queue if local queue is overloaded
-            if (!pushed_to_local) {
-                if (!task_queue_.push(std::move(t))) {
-                    throw std::runtime_error("ThreadPool is shutdown. Cannot submit new tasks.");
+            if (!pushed_local) {
+                if (!task_queue_.push(std::move(st))) {
+                    throw std::runtime_error("ThreadPool shutdown");
                 }
             }
-        } else {
-            // External thread → always use global queue
-            if (!task_queue_.push(std::move(t))) {
-                throw std::runtime_error("ThreadPool is shutdown. Cannot submit new tasks.");
+        }
+        // External thread → global queue
+        else {
+            if (!task_queue_.push(std::move(st))) {
+                throw std::runtime_error("ThreadPool shutdown");
             }
         }
 
@@ -131,13 +125,28 @@ class ThreadPool {
         return promise_ptr->get_future();
     }
 
+    // =======================
+    // Lifecycle
+    // =======================
     void shutdown() noexcept;
 
     bool is_shutdown() const noexcept {
         return task_queue_.is_shutdown();
     }
 
+    // =======================
+    // Worker API
+    // =======================
+    WorkerState &get_worker_state(int id);
+
+    bool try_steal_task(int thief_id, ScheduledTask &stolen);
+    bool try_steal_tasks_batch(int thief_id, std::vector<ScheduledTask> &stolen);
+
+    void help_one_task();
+
+    // =======================
     // Metrics hooks
+    // =======================
     void on_task_start() noexcept {
         active_workers_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -148,7 +157,9 @@ class ThreadPool {
         total_inflight_.fetch_sub(1, std::memory_order_relaxed);
     }
 
-    // Observable APIs
+    // =======================
+    // Observability
+    // =======================
     size_t pending_task() const {
         return task_queue_.size();
     }
@@ -164,18 +175,6 @@ class ThreadPool {
     size_t total_completed() const {
         return total_completed_;
     }
-
-    // Accessor for worker state by thread ID
-    WorkerState &get_worker_state(int id) {
-        return worker_states_[id];
-    }
-
-    // Work stealing APIs
-    bool try_steal_task(int thief_id, Task &stolen_task);
-    bool try_steal_tasks_batch(int thief_id, std::vector<Task> &stolen_tasks);
-
-    // Cooperative execution (helps avoid idle spinning)
-    void help_one_task();
 
     bool is_idle() const noexcept {
         return total_inflight_.load(std::memory_order_relaxed) == 0;
