@@ -388,48 +388,47 @@ int main() {
         // }
 
         // * Test 15 — Stealing conflict
-        std::vector<std::future<int>> futures;
-        std::mutex cout_mutex;
-        std::cout << "\n=== Priority vs Stealing Conflict Test ===\n";
-        // One heavy LOW task to create imbalance
-        futures.push_back(pool.submit_with_priority(1, [&cout_mutex]() {
-            {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[LOW-HEAVY] started\n";
-            }
-            std::this_thread::sleep_for(1s);
-            return 0;
-        }));
-        // Many small LOW tasks
-        for (int i = 0; i < 50; i++) {
-            futures.push_back(pool.submit_with_priority(1, [] {
-                std::this_thread::sleep_for(10ms);
-                return 1;
-            }));
-        }
-        // Inject HIGH tasks mid-way
-        std::this_thread::sleep_for(100ms);
-        for (int i = 0; i < 10; i++) {
-            futures.push_back(pool.submit_with_priority(100, [i, &cout_mutex]() {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[HIGH] " << i << "\n";
-                return i;
-            }));
-        }
+        // std::vector<std::future<int>> futures;
+        // std::mutex cout_mutex;
+        // std::cout << "\n=== Priority vs Stealing Conflict Test ===\n";
+        // // One heavy LOW task to create imbalance
+        // futures.push_back(pool.submit_with_priority(1, [&cout_mutex]() {
+        //     {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "[LOW-HEAVY] started\n";
+        //     }
+        //     std::this_thread::sleep_for(1s);
+        //     return 0;
+        // }));
+        // // Many small LOW tasks
+        // for (int i = 0; i < 50; i++) {
+        //     futures.push_back(pool.submit_with_priority(1, [] {
+        //         std::this_thread::sleep_for(10ms);
+        //         return 1;
+        //     }));
+        // }
+        // // Inject HIGH tasks mid-way
+        // std::this_thread::sleep_for(100ms);
+        // for (int i = 0; i < 10; i++) {
+        //     futures.push_back(pool.submit_with_priority(100, [i, &cout_mutex]() {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "[HIGH] " << i << "\n";
+        //         return i;
+        //     }));
+        // }
 
         // =======================
         // Wait for all tasks
         // =======================
-        for (auto &f : futures) {
-            try {
-                f.get();
-            } catch (const std::exception &e) {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "Exception: " << e.what() << "\n";
-            }
-        }
-
-        std::cout << "=== Priority Test End ===\n";
+        // for (auto &f : futures) {
+        //     try {
+        //         f.get();
+        //     } catch (const std::exception &e) {
+        //         std::lock_guard<std::mutex> lock(cout_mutex);
+        //         std::cout << "Exception: " << e.what() << "\n";
+        //     }
+        // }
+        // std::cout << "=== Priority Test End ===\n";
 
         // Process results (CRITICAL)
         // =======================
@@ -444,6 +443,36 @@ int main() {
         //     }
         // }
 
+        // * Test 16 - Delayed Tasks
+        // std::cout << "\n=== Delay Basic Test ===\n";
+        // std::mutex cout_mutex;
+        // auto start = std::chrono::steady_clock::now();
+        // pool.submit_after(std::chrono::milliseconds(500), [&]() {
+        //     auto now = std::chrono::steady_clock::now();
+        //     auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now -
+        //     start).count(); std::lock_guard<std::mutex> lock(cout_mutex); std::cout << "[Delay
+        //     Test] Executed after " << diff << " ms\n";
+        // });
+        // for (int d : {100, 300, 500}) {
+        //     pool.submit_after(std::chrono::milliseconds(d),
+        //                       [d]() { std::cout << "[Delay] " << d << "ms\n"; });
+        // }
+        // std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+        // * Test 17 - priority vs delay conflict
+
+        std::cout << "\n=== Priority vs Delay Conflict ===\n";
+
+        // Long LOW task
+        pool.submit_with_priority(1, [&]() {
+            std::this_thread::sleep_for(500ms);
+            std::cout << "[LOW] finished\n";
+        });
+        // Give it time to start
+        std::this_thread::sleep_for(50ms);
+        // HIGH delayed task
+        pool.submit_after(10ms, [&]() { std::cout << "[HIGH] executed\n"; });
+
         // =======================
         // Shutdown & Drain
         // =======================
@@ -452,7 +481,7 @@ int main() {
             std::this_thread::sleep_for(10ms);
         }
 
-        // // stop monitor thread
+        // stop monitor thread
         // running.store(false, std::memory_order_relaxed);
         // monitor.join();
 

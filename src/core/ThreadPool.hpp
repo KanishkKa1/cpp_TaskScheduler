@@ -4,10 +4,13 @@
 #include "task/Task.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <future>
 #include <mutex>
+#include <queue>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -18,7 +21,7 @@
 extern thread_local int worker_id;
 
 // =======================
-// Scheduled Task (priority metadata)
+// Scheduled Task
 // =======================
 struct ScheduledTask {
     int priority;
@@ -38,13 +41,48 @@ struct WorkerState {
 // =======================
 class ThreadPool {
   private:
-    // Global FIFO queue (NOT priority queue)
+    // =======================
+    // GLOBAL QUEUE
+    // =======================
     SafeQueue<ScheduledTask> task_queue_;
 
     std::vector<std::thread> workers_;
     std::vector<WorkerState> worker_states_;
 
-    // Metrics (observability only)
+    // =======================
+    // DELAYED TASK SYSTEM
+    // =======================
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
+
+    struct DelayedTask {
+        TimePoint execute_at;
+        ScheduledTask task;
+    };
+
+    struct CompareDelayed {
+        bool operator()(const DelayedTask &a, const DelayedTask &b) const {
+            return a.execute_at > b.execute_at;
+        }
+    };
+
+    using DelayedQueue = std::priority_queue<DelayedTask, std::vector<DelayedTask>, CompareDelayed>;
+
+    DelayedQueue delayed_queue_;
+    std::mutex delayed_mutex_;
+    std::condition_variable delayed_cv_;
+    std::thread timer_thread_;
+    std::atomic<bool> stop_timer_{false};
+
+    // =====================
+    // Worker signaling
+    // ======================
+    std::condition_variable worker_cv_;
+    std::mutex worker_cv_mutex_;
+
+    // =======================
+    // Metrics
+    // =======================
     std::atomic<size_t> active_workers_{0};
     std::atomic<size_t> total_submitted_{0};
     std::atomic<size_t> total_completed_{0};
@@ -61,7 +99,7 @@ class ThreadPool {
     ThreadPool &operator=(const ThreadPool &) = delete;
 
     // =======================
-    // SUBMIT (default priority)
+    // SUBMIT
     // =======================
     template <typename F, typename... Args> auto submit(F &&f, Args &&...args) {
         return submit_with_priority(0, std::forward<F>(f), std::forward<Args>(args)...);
@@ -98,6 +136,7 @@ class ThreadPool {
             auto &state = worker_states_[worker_id];
 
             bool pushed_local = false;
+
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
                 if (state.local_queue.size() < LOCAL_QUEUE_THRESHOLD) {
@@ -116,6 +155,54 @@ class ThreadPool {
         else {
             if (!task_queue_.push(std::move(st))) {
                 throw std::runtime_error("ThreadPool shutdown");
+            }
+        }
+
+        worker_cv_.notify_one();
+
+        total_submitted_.fetch_add(1, std::memory_order_relaxed);
+        total_inflight_.fetch_add(1, std::memory_order_relaxed);
+
+        return promise_ptr->get_future();
+    }
+
+    // =======================
+    // SUBMIT WITH DELAY
+    // =======================
+    template <typename F, typename... Args>
+    auto submit_after(std::chrono::milliseconds delay, F &&f, Args &&...args)
+        -> std::future<std::invoke_result_t<F, Args...>> {
+        using ReturnType = std::invoke_result_t<F, Args...>;
+
+        auto promise_ptr = std::make_shared<std::promise<ReturnType>>();
+
+        ScheduledTask st{0, Task([f_ = std::forward<F>(f), ... args_ = std::forward<Args>(args),
+                                  promise_ptr]() mutable {
+                             try {
+                                 if constexpr (std::is_void_v<ReturnType>) {
+                                     std::invoke(f_, std::move(args_)...);
+                                     promise_ptr->set_value();
+                                 } else {
+                                     promise_ptr->set_value(std::invoke(f_, std::move(args_)...));
+                                 }
+                             } catch (...) {
+                                 promise_ptr->set_exception(std::current_exception());
+                             }
+                         })};
+
+        auto execute_at = Clock::now() + delay;
+
+        {
+            std::unique_lock<std::mutex> lock(delayed_mutex_);
+
+            bool notify = delayed_queue_.empty() || execute_at < delayed_queue_.top().execute_at;
+
+            delayed_queue_.push(DelayedTask{execute_at, std::move(st)});
+
+            lock.unlock();
+
+            if (notify) {
+                delayed_cv_.notify_one();
             }
         }
 
@@ -143,6 +230,7 @@ class ThreadPool {
     bool try_steal_tasks_batch(int thief_id, std::vector<ScheduledTask> &stolen);
 
     void help_one_task();
+    void timer_loop();
 
     // =======================
     // Metrics hooks

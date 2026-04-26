@@ -3,10 +3,8 @@
 #include "Worker.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <iostream>
 #include <thread>
-#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -21,15 +19,19 @@ ThreadPool::ThreadPool(size_t num_threads) : task_queue_(100), worker_states_(nu
         workers_.emplace_back([this, i] {
             worker_id = static_cast<int>(i);
 
-            for (;;) {
+            while (true) {
                 help_one_task();
 
                 if (task_queue_.is_shutdown() && is_idle()) {
                     break;
                 }
             }
+
+            worker_id = -1;
         });
     }
+
+    timer_thread_ = std::thread([this] { timer_loop(); });
 }
 
 // =======================
@@ -37,6 +39,10 @@ ThreadPool::ThreadPool(size_t num_threads) : task_queue_(100), worker_states_(nu
 // =======================
 ThreadPool::~ThreadPool() noexcept {
     shutdown();
+
+    if (timer_thread_.joinable()) {
+        timer_thread_.join();
+    }
 
     for (auto &t : workers_) {
         if (t.joinable()) {
@@ -53,8 +59,78 @@ void ThreadPool::shutdown() noexcept {
         return;
 
     task_queue_.shutdown();
+
+    // Stop timer thread explicitly
+    stop_timer_.store(true, std::memory_order_relaxed);
+
+    {
+        std::lock_guard<std::mutex> lock(delayed_mutex_);
+    }
+
+    delayed_cv_.notify_all();
+    worker_cv_.notify_all();
+    task_queue_.shutdown();
 }
 
+// =======================
+// Timer Loop for Delayed Tasks
+// =======================
+void ThreadPool::timer_loop() {
+    std::unique_lock<std::mutex> lock(delayed_mutex_);
+
+    while (true) {
+        // Exit condition
+        if (stop_timer_.load(std::memory_order_relaxed) && delayed_queue_.empty()) {
+            break;
+        }
+
+        // Case 1: no delayed tasks → wait
+        if (delayed_queue_.empty()) {
+            delayed_cv_.wait(lock, [&] {
+                return stop_timer_.load(std::memory_order_relaxed) || !delayed_queue_.empty();
+            });
+            continue;
+        }
+
+        auto now = Clock::now();
+        auto next_time = delayed_queue_.top().execute_at;
+
+        // Case 2: not ready → timed wait
+        if (now < next_time) {
+            delayed_cv_.wait_until(lock, next_time, [&] {
+                return stop_timer_.load(std::memory_order_relaxed) ||
+                       (!delayed_queue_.empty() && delayed_queue_.top().execute_at < next_time);
+            });
+            continue;
+        }
+
+        // Case 3: ready tasks → move out
+        std::vector<ScheduledTask> ready;
+
+        while (!delayed_queue_.empty()) {
+            auto &top_ref = const_cast<DelayedTask &>(delayed_queue_.top());
+
+            if (top_ref.execute_at > Clock::now())
+                break;
+
+            DelayedTask dt = std::move(top_ref);
+            delayed_queue_.pop();
+
+            ready.push_back(std::move(dt.task));
+        }
+
+        lock.unlock();
+
+        // Push to global queue
+        for (auto &task : ready) {
+            task_queue_.push(std::move(task));
+        }
+
+        worker_cv_.notify_all();
+
+        lock.lock();
+    }
+}
 // =======================
 // Worker state access
 // =======================
@@ -130,8 +206,9 @@ bool ThreadPool::try_steal_tasks_batch(int thief_id, std::vector<ScheduledTask> 
 // Core Execution Step
 // =======================
 void ThreadPool::help_one_task() {
-    if (worker_id == -1)
+    if (worker_id == -1) {
         return;
+    }
 
     auto &state = get_worker_state(worker_id);
 
@@ -227,11 +304,7 @@ void ThreadPool::help_one_task() {
         return;
     }
 
-    // -----------------------
-    // 5. NO WORK → BACKOFF
-    // -----------------------
-    for (int i = 0; i < 10; ++i)
-        std::this_thread::yield();
-
-    std::this_thread::sleep_for(50us);
+    // 5. WAIT
+    std::unique_lock<std::mutex> lock(worker_cv_mutex_);
+    worker_cv_.wait_for(lock, std::chrono::milliseconds(1));
 }
