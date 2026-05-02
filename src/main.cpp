@@ -38,7 +38,7 @@ int main() {
                               << " | Submitted=" << pool.total_submitted()
                               << " | Completed=" << pool.total_completed() << "\n";
                 }
-                std::this_thread::sleep_for(500ms);
+                std::this_thread::sleep_for(100ms);
             }
         });
 
@@ -496,19 +496,29 @@ int main() {
         // std::this_thread::sleep_for(500ms);
 
         // * Test 19 - Delayed Priority test
-        std::cout << "\n=== Delayed Priority Test ===\n";
+        // std::cout << "\n=== Delayed Priority Test ===\n";
+        // pool.submit_after_with_priority(1, 50ms, [] { std::cout << "[LOW delayed]\n"; });
+        // pool.submit_after_with_priority(100, 50ms, [] { std::cout << "[HIGH delayed]\n"; });
+        // std::this_thread::sleep_for(200ms);
 
-        pool.submit_after_with_priority(1, 50ms, [] { std::cout << "[LOW delayed]\n"; });
-        pool.submit_after_with_priority(100, 50ms, [] { std::cout << "[HIGH delayed]\n"; });
-        std::this_thread::sleep_for(200ms);
+        // * Test 20 - shutdown
+        ThreadPool pool(2);
         pool.shutdown();
-        while (!pool.is_idle()) {
-            std::this_thread::sleep_for(10ms);
+        try {
+            pool.submit([] {});
+        } catch (...) {
+            std::cout << "Correctly rejected\n";
         }
+
+        pool.shutdown();
+        // while (!pool.is_idle()) {
+        //     std::this_thread::sleep_for(10ms);
+        // }
 
         // stop monitor thread
         // running.store(false, std::memory_order_relaxed);
-        // monitor.join();
+        monitor.request_stop();
+        monitor.join();
 
         // Capture final metrics after shutdown
         submitted = pool.total_submitted();

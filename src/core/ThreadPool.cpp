@@ -23,10 +23,7 @@ ThreadPool::ThreadPool(size_t num_threads) : worker_states_(num_threads) {
             while (true) {
                 help_one_task();
 
-                // if (task_queue_.is_shutdown() && is_idle()) {
-                //     break;
-                // }
-                if (ready_q_.is_shutdown() && is_idle()) {
+                if (should_worker_exit(worker_id)) {
                     break;
                 }
             }
@@ -235,7 +232,31 @@ void ThreadPool::help_one_task() {
     }
 
     // -----------------------
-    // 2. GLOBAL AGAIN (close race)
+    // LOCAL (priority-aware)
+    // -----------------------
+    if (state.mutex.try_lock()) {
+        if (!state.local_queue.empty()) {
+            ScheduledTask st = std::move(state.local_queue.back());
+            state.local_queue.pop_back();
+            state.mutex.unlock();
+
+            on_task_start();
+            try {
+                st.task();
+            } catch (const std::exception &e) {
+                std::cerr << "[ThreadPool] Task exception: " << e.what() << '\n';
+            } catch (...) {
+                std::cerr << "[ThreadPool] Unknown task exception\n";
+            }
+            on_task_end();
+
+            return;
+        }
+        state.mutex.unlock();
+    }
+
+    // -----------------------
+    // 3. GLOBAL AGAIN (race recovery)
     // -----------------------
     // if (auto opt = task_queue_.try_pop()) {
     if (auto opt = ready_q_.try_pop()) {
@@ -255,145 +276,36 @@ void ThreadPool::help_one_task() {
     }
 
     // -----------------------
-    // 3. LOCAL (LIFO)
-    // -----------------------
-    // if (state.mutex.try_lock()) {
-    //     if (!state.local_queue.empty()) {
-    //         ScheduledTask st = std::move(state.local_queue.back());
-    //         state.local_queue.pop_back();
-    //         state.mutex.unlock();
-
-    //         on_task_start();
-    //         try {
-    //             st.task();
-    //         } catch (const std::exception &e) {
-    //             std::cerr << "[ThreadPool] Task exception: " << e.what() << '\n';
-    //         } catch (...) {
-    //             std::cerr << "[ThreadPool] Unknown task exception\n";
-    //         }
-    //         on_task_end();
-
-    //         return;
-    //     }
-    //     state.mutex.unlock();
-    // }
-
-    // -----------------------
-    // LOCAL (priority-aware)
-    // -----------------------
-    auto global_top = ready_q_.peek();
-
-    if (state.mutex.try_lock()) {
-        if (!state.local_queue.empty()) {
-
-            auto &local_task = state.local_queue.back();
-
-            bool should_run_local = false;
-
-            if (!global_top.has_value()) {
-                should_run_local = true;
-            } else {
-                // allow local only if it is >= global priority
-                should_run_local = (local_task.priority >= global_top->get().priority);
-            }
-
-            if (should_run_local) {
-                ScheduledTask st = std::move(local_task);
-                state.local_queue.pop_back();
-                state.mutex.unlock();
-
-                on_task_start();
-                try {
-                    st.task();
-                } catch (...) {
-                }
-                on_task_end();
-
-                return;
-            }
-        }
-        state.mutex.unlock();
-    }
-
-    // -----------------------
-    // 4. STEAL (batch)
-    // -----------------------
-    // thread_local std::vector<ScheduledTask> stolen;
-    // stolen.clear();
-    // if (try_steal_tasks_batch(worker_id, stolen) && !stolen.empty()) {
-    //     ScheduledTask st = std::move(stolen.back());
-    //     stolen.pop_back();
-    //     {
-    //         std::lock_guard<std::mutex> lock(state.mutex);
-    //         for (auto &task : stolen) {
-    //             state.local_queue.push_back(std::move(task));
-    //         }
-    //     }
-    //     on_task_start();
-    //     try {
-    //         st.task();
-    //     } catch (const std::exception &e) {
-    //         std::cerr << "[ThreadPool] Task exception: " << e.what() << '\n';
-    //     } catch (...) {
-    //         std::cerr << "[ThreadPool] Unknown task exception\n";
-    //     }
-    //     on_task_end();
-    //     return;
-    // }
-
-    // -----------------------
     // 4. STEAL (priority-aware)
     // -----------------------
+    thread_local std::vector<ScheduledTask> stolen;
+    stolen.clear();
 
-    auto global_top_steal = ready_q_.peek();
-    bool can_steal = false;
+    if (try_steal_tasks_batch(worker_id, stolen) && !stolen.empty()) {
+        ScheduledTask st = std::move(stolen.back());
+        stolen.pop_back();
 
-    if (!global_top_steal.has_value()) {
-        can_steal = true; // nothing in global
-    } else {
-        // We will only run a stolen task if it is >= global top
-        can_steal = true; // we still try to steal, but we validate before executing
-    }
-
-    if (can_steal) {
-        thread_local std::vector<ScheduledTask> stolen;
-        stolen.clear();
-        if (try_steal_tasks_batch(worker_id, stolen) && !stolen.empty()) {
-            ScheduledTask st = std::move(stolen.back());
-            stolen.pop_back();
-            {
-                std::lock_guard<std::mutex> lock(state.mutex);
-                for (auto &t : stolen) {
-                    state.local_queue.push_back(std::move(t));
-                }
-            }
-            auto gt = ready_q_.peek();
-            bool should_run = false;
-
-            if (!gt.has_value()) {
-                should_run = true;
-            } else {
-                should_run = (st.priority >= gt->get().priority);
-            }
-            if (should_run) {
-                on_task_start();
-                try {
-                    st.task();
-                } catch (...) {
-                }
-                on_task_end();
-                return;
-            } else {
-                std::lock_guard<std::mutex> lock(state.mutex);
-                state.local_queue.push_back(std::move(st));
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            for (auto &t : stolen) {
+                state.local_queue.push_back(std::move(t));
             }
         }
+
+        on_task_start();
+        try {
+            st.task();
+        } catch (...) {
+        }
+        on_task_end();
+        return;
     }
 
     // 5. WAIT
     std::unique_lock<std::mutex> lock(worker_cv_mutex_);
     // worker_cv_.wait_for(lock, std::chrono::milliseconds(1));
-    worker_cv_.wait(lock);
+    worker_cv_.wait(
+        lock, [&] { return shutdown_flag_.load(std::memory_order_relaxed) || !ready_q_.empty(); });
 }
 
 bool ThreadPool::should_worker_exit(int id) const {

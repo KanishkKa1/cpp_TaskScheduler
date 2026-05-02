@@ -127,6 +127,10 @@ class ThreadPool {
 
         using ReturnType = std::invoke_result_t<F, Args...>;
 
+        if (shutdown_flag_.load(std::memory_order_relaxed)) {
+            throw std::runtime_error("ThreadPool shutdown");
+        }
+
         auto promise_ptr = std::make_shared<std::promise<ReturnType>>();
 
         ScheduledTask st{priority,
