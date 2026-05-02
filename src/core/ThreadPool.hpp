@@ -217,12 +217,30 @@ class ThreadPool {
     template <typename F, typename... Args>
     auto submit_after(std::chrono::milliseconds delay, F &&f, Args &&...args)
         -> std::future<std::invoke_result_t<F, Args...>> {
+
+        return submit_after_with_priority(0, delay, std::forward<F>(f),
+                                          std::forward<Args>(args)...);
+    }
+
+    // =======================
+    // SUBMIT WITH DELAY + PRIORITY
+    // =======================
+    template <typename F, typename... Args>
+    auto submit_after_with_priority(int priority, std::chrono::milliseconds delay, F &&f,
+                                    Args &&...args)
+        -> std::future<std::invoke_result_t<F, Args...>> {
+
         using ReturnType = std::invoke_result_t<F, Args...>;
+
+        if (shutdown_flag_.load(std::memory_order_relaxed)) {
+            throw std::runtime_error("ThreadPool shutdown");
+        }
 
         auto promise_ptr = std::make_shared<std::promise<ReturnType>>();
 
-        ScheduledTask st{0, Task([f_ = std::forward<F>(f), ... args_ = std::forward<Args>(args),
-                                  promise_ptr]() mutable {
+        ScheduledTask st{priority,
+                         Task([f_ = std::forward<F>(f), ... args_ = std::forward<Args>(args),
+                               promise_ptr]() mutable {
                              try {
                                  if constexpr (std::is_void_v<ReturnType>) {
                                      std::invoke(f_, std::move(args_)...);

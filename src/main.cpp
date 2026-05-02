@@ -16,7 +16,8 @@ const int TASKS_PER_PRODUCER = 100;
 int main() {
     std::cout << "=== ThreadPool Test Start ===\n";
 
-    ThreadPool pool(4);
+    // ThreadPool pool(4);
+    ThreadPool pool(2);
     std::vector<std::future<int>> futures;
     futures.reserve(NUM_PRODUCERS * TASKS_PER_PRODUCER);
 
@@ -472,32 +473,34 @@ int main() {
         // pool.submit_after(10ms, [&]() { std::cout << "[HIGH] executed\n"; });
 
         // * Test 18 - Pure Priority
+        // std::cout << "\n=== Pure Priority Test ===\n";
+        // std::atomic<bool> start{false};
+        // for (int i = 0; i < 5; i++) {
+        //     pool.submit_with_priority(1, [i, &start]() {
+        //         while (!start.load()) {
+        //         }
+        //         std::this_thread::sleep_for(10ms);
+        //         std::cout << "[LOW " << i << "]\n";
+        //     });
+        // }
+        // for (int i = 0; i < 3; i++) {
+        //     pool.submit_with_priority(100, [i, &start]() {
+        //         while (!start.load()) {
+        //         }
+        //         std::this_thread::sleep_for(10ms);
+        //         std::cout << "[HIGH " << i << "]\n";
+        //     });
+        // }
+        // std::this_thread::sleep_for(50ms);
+        // start.store(true);
+        // std::this_thread::sleep_for(500ms);
 
-        std::cout << "\n=== Pure Priority Test ===\n";
-        std::atomic<bool> start{false};
-        for (int i = 0; i < 5; i++) {
-            pool.submit_with_priority(1, [i, &start]() {
-                while (!start.load()) {
-                }
-                std::this_thread::sleep_for(10ms);
-                std::cout << "[LOW " << i << "]\n";
-            });
-        }
+        // * Test 19 - Delayed Priority test
+        std::cout << "\n=== Delayed Priority Test ===\n";
 
-        for (int i = 0; i < 3; i++) {
-            pool.submit_with_priority(100, [i, &start]() {
-                while (!start.load()) {
-                }
-                std::this_thread::sleep_for(10ms);
-                std::cout << "[HIGH " << i << "]\n";
-            });
-        }
-
-        std::this_thread::sleep_for(50ms);
-        start.store(true);
-
-        std::this_thread::sleep_for(500ms);
-
+        pool.submit_after_with_priority(1, 50ms, [] { std::cout << "[LOW delayed]\n"; });
+        pool.submit_after_with_priority(100, 50ms, [] { std::cout << "[HIGH delayed]\n"; });
+        std::this_thread::sleep_for(200ms);
         pool.shutdown();
         while (!pool.is_idle()) {
             std::this_thread::sleep_for(10ms);
