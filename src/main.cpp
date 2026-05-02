@@ -481,6 +481,44 @@ int main() {
             std::this_thread::sleep_for(10ms);
         }
 
+        // * Test 18 - Pure Priority
+        std::cout << "\n=== Pure Priority Test ===\n";
+
+        std::atomic<bool> start{false};
+
+        // LOW tasks
+        for (int i = 0; i < 5; i++) {
+            pool.submit_with_priority(1, [i, &start]() {
+                while (!start.load()) {
+                }
+                std::this_thread::sleep_for(10ms); // simulate work
+                std::cout << "[LOW " << i << "]\n";
+            });
+        }
+
+        // HIGH tasks
+        for (int i = 0; i < 3; i++) {
+            pool.submit_with_priority(100, [i, &start]() {
+                while (!start.load()) {
+                }
+                std::this_thread::sleep_for(10ms);
+                std::cout << "[HIGH " << i << "]\n";
+            });
+        }
+
+        // ensure ALL tasks are submitted
+        std::this_thread::sleep_for(50ms);
+
+        // release execution
+        start.store(true);
+
+        std::this_thread::sleep_for(500ms);
+
+        pool.shutdown();
+        while (!pool.is_idle()) {
+            std::this_thread::sleep_for(10ms);
+        }
+
         // stop monitor thread
         // running.store(false, std::memory_order_relaxed);
         // monitor.join();

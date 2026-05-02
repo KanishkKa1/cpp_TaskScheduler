@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/BlockingPriorityQueue.hpp"
 #include "core/SafeQueue.hpp"
 #include "task/Task.hpp"
 
@@ -36,6 +37,13 @@ struct WorkerState {
     std::mutex mutex;
 };
 
+// Creates a max-heap by priority and highest priority comes first
+struct CompareReady {
+    bool operator()(const ScheduledTask &a, const ScheduledTask &b) const {
+        return a.priority < b.priority;
+    }
+};
+
 // =======================
 // ThreadPool
 // =======================
@@ -44,7 +52,8 @@ class ThreadPool {
     // =======================
     // GLOBAL QUEUE
     // =======================
-    SafeQueue<ScheduledTask> task_queue_;
+    // SafeQueue<ScheduledTask> task_queue_;
+    BlockingPriorityQueue<ScheduledTask, CompareReady> ready_q_;
 
     std::vector<std::thread> workers_;
     std::vector<WorkerState> worker_states_;
@@ -132,7 +141,47 @@ class ThreadPool {
                          })};
 
         // Worker thread → local queue (fast path)
-        if (worker_id >= 0 && worker_id < (int)worker_states_.size()) {
+        // if (worker_id >= 0 && worker_id < (int)worker_states_.size()) {
+        //     auto &state = worker_states_[worker_id];
+
+        //     bool pushed_local = false;
+
+        //     {
+        //         std::lock_guard<std::mutex> lock(state.mutex);
+        //         if (state.local_queue.size() < LOCAL_QUEUE_THRESHOLD) {
+        //             state.local_queue.push_back(std::move(st));
+        //             pushed_local = true;
+        //         }
+        //     }
+
+        //     if (!pushed_local) {
+        //         // if (!task_queue_.push(std::move(st))) {
+        //         //     throw std::runtime_error("ThreadPool shutdown");
+        //         // }
+        //         if (!ready_q_.push(std::move(st))) {
+        //             throw std::runtime_error("ThreadPool shutdown");
+        //         }
+        //     }
+        // }
+        // // External thread → global queue
+        // else {
+        //     // if (!task_queue_.push(std::move(st))) {
+        //     //     throw std::runtime_error("ThreadPool shutdown");
+        //     // }
+        //     if (!ready_q_.push(std::move(st))) {
+        //         throw std::runtime_error("ThreadPool shutdown");
+        //     }
+        // }
+
+        bool is_worker = (worker_id >= 0 && worker_id < (int)worker_states_.size());
+
+        if (!is_worker || priority > 0) {
+            // HIGH priority OR external thread → always global
+            if (!ready_q_.push(std::move(st))) {
+                throw std::runtime_error("ThreadPool shutdown");
+            }
+        } else {
+            // LOW priority from worker → local queue (fast path)
             auto &state = worker_states_[worker_id];
 
             bool pushed_local = false;
@@ -146,15 +195,7 @@ class ThreadPool {
             }
 
             if (!pushed_local) {
-                if (!task_queue_.push(std::move(st))) {
-                    throw std::runtime_error("ThreadPool shutdown");
-                }
-            }
-        }
-        // External thread → global queue
-        else {
-            if (!task_queue_.push(std::move(st))) {
-                throw std::runtime_error("ThreadPool shutdown");
+                ready_q_.push(std::move(st));
             }
         }
 
@@ -218,7 +259,8 @@ class ThreadPool {
     void shutdown() noexcept;
 
     bool is_shutdown() const noexcept {
-        return task_queue_.is_shutdown();
+        // return task_queue_.is_shutdown();
+        return ready_q_.is_shutdown();
     }
 
     // =======================
@@ -249,7 +291,8 @@ class ThreadPool {
     // Observability
     // =======================
     size_t pending_task() const {
-        return task_queue_.size();
+        // return task_queue_.size();
+        return ready_q_.size();
     }
 
     size_t active_workers() const {
