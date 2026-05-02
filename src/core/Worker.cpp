@@ -25,7 +25,7 @@ void Worker::operator()() {
         thread_pool_.help_one_task();
 
         // Exit condition
-        if (thread_pool_.is_shutdown() && thread_pool_.is_idle()) {
+        if (thread_pool_.should_worker_exit(worker_id)) {
             break;
         }
 

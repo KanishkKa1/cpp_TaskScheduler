@@ -59,27 +59,18 @@ ThreadPool::~ThreadPool() noexcept {
 // Shutdown
 // =======================
 void ThreadPool::shutdown() noexcept {
-    // if (task_queue_.is_shutdown()){
-    //     return;
-    // }
-    if (ready_q_.is_shutdown()) {
+    bool expected = false;
+    if (!shutdown_flag_.compare_exchange_strong(expected, true)) {
         return;
     }
 
-    // task_queue_.shutdown();
     ready_q_.shutdown();
 
-    // Stop timer thread explicitly
+    // stop timer thread
     stop_timer_.store(true, std::memory_order_relaxed);
-
-    {
-        std::lock_guard<std::mutex> lock(delayed_mutex_);
-    }
 
     delayed_cv_.notify_all();
     worker_cv_.notify_all();
-    // task_queue_.shutdown();
-    ready_q_.shutdown();
 }
 
 // =======================
@@ -403,4 +394,39 @@ void ThreadPool::help_one_task() {
     std::unique_lock<std::mutex> lock(worker_cv_mutex_);
     // worker_cv_.wait_for(lock, std::chrono::milliseconds(1));
     worker_cv_.wait(lock);
+}
+
+bool ThreadPool::should_worker_exit(int id) const {
+    if (!shutdown_flag_.load(std::memory_order_relaxed)) {
+        return false;
+    }
+
+    // global queue
+    if (!ready_q_.empty()) {
+        return false;
+    }
+
+    // delayed queue
+    {
+        std::lock_guard<std::mutex> lock(delayed_mutex_);
+        if (!delayed_queue_.empty()) {
+            return false;
+        }
+    }
+
+    // local queue
+    const auto &state = worker_states_[id];
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.local_queue.empty()) {
+            return false;
+        }
+    }
+
+    // inflight tasks
+    if (total_inflight_.load(std::memory_order_relaxed) != 0) {
+        return false;
+    }
+
+    return true;
 }

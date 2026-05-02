@@ -34,7 +34,7 @@ struct ScheduledTask {
 // =======================
 struct WorkerState {
     std::deque<ScheduledTask> local_queue;
-    std::mutex mutex;
+    mutable std::mutex mutex;
 };
 
 // Creates a max-heap by priority and highest priority comes first
@@ -78,7 +78,7 @@ class ThreadPool {
     using DelayedQueue = std::priority_queue<DelayedTask, std::vector<DelayedTask>, CompareDelayed>;
 
     DelayedQueue delayed_queue_;
-    std::mutex delayed_mutex_;
+    mutable std::mutex delayed_mutex_;
     std::condition_variable delayed_cv_;
     std::thread timer_thread_;
     std::atomic<bool> stop_timer_{false};
@@ -99,6 +99,10 @@ class ThreadPool {
 
     static constexpr size_t MAX_STEAL_BATCH = 4;
     static constexpr size_t LOCAL_QUEUE_THRESHOLD = 64;
+
+    // ====================
+    // shutdown
+    std::atomic<bool> shutdown_flag_{false};
 
   public:
     explicit ThreadPool(size_t num_threads);
@@ -262,6 +266,8 @@ class ThreadPool {
         // return task_queue_.is_shutdown();
         return ready_q_.is_shutdown();
     }
+
+    bool should_worker_exit(int id) const;
 
     // =======================
     // Worker API

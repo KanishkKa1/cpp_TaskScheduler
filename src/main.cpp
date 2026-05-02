@@ -460,43 +460,30 @@ int main() {
         // std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
         // * Test 17 - priority vs delay conflict
-
-        std::cout << "\n=== Priority vs Delay Conflict ===\n";
-
-        // Long LOW task
-        pool.submit_with_priority(1, [&]() {
-            std::this_thread::sleep_for(500ms);
-            std::cout << "[LOW] finished\n";
-        });
-        // Give it time to start
-        std::this_thread::sleep_for(50ms);
-        // HIGH delayed task
-        pool.submit_after(10ms, [&]() { std::cout << "[HIGH] executed\n"; });
-
-        // =======================
-        // Shutdown & Drain
-        // =======================
-        pool.shutdown();
-        while (!pool.is_idle()) {
-            std::this_thread::sleep_for(10ms);
-        }
+        // std::cout << "\n=== Priority vs Delay Conflict ===\n";
+        // // Long LOW task
+        // pool.submit_with_priority(1, [&]() {
+        //     std::this_thread::sleep_for(500ms);
+        //     std::cout << "[LOW] finished\n";
+        // });
+        // // Give it time to start
+        // std::this_thread::sleep_for(50ms);
+        // // HIGH delayed task
+        // pool.submit_after(10ms, [&]() { std::cout << "[HIGH] executed\n"; });
 
         // * Test 18 - Pure Priority
+
         std::cout << "\n=== Pure Priority Test ===\n";
-
         std::atomic<bool> start{false};
-
-        // LOW tasks
         for (int i = 0; i < 5; i++) {
             pool.submit_with_priority(1, [i, &start]() {
                 while (!start.load()) {
                 }
-                std::this_thread::sleep_for(10ms); // simulate work
+                std::this_thread::sleep_for(10ms);
                 std::cout << "[LOW " << i << "]\n";
             });
         }
 
-        // HIGH tasks
         for (int i = 0; i < 3; i++) {
             pool.submit_with_priority(100, [i, &start]() {
                 while (!start.load()) {
@@ -506,10 +493,7 @@ int main() {
             });
         }
 
-        // ensure ALL tasks are submitted
         std::this_thread::sleep_for(50ms);
-
-        // release execution
         start.store(true);
 
         std::this_thread::sleep_for(500ms);
